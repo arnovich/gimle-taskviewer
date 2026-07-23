@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,30 @@ async def test_mark_ongoing_then_done_moves_task(project: Path) -> None:
         await pilot.press("o")
         await pilot.pause()
         assert any((tasks_dir / "closed").glob("*"))
+
+
+@pytest.mark.asyncio
+async def test_background_groom_runs_and_shows_report(
+    project: Path, tmp_path: Path
+) -> None:
+    stub = tmp_path / "fake_claude.py"
+    stub.write_text(
+        "import os, sys\n"
+        "open(os.path.join(os.getcwd(), 'GROOMED'), 'w').close()\n"
+        "sys.stdout.write('- 052: raised priority to high\\n')\n"
+    )
+    app = TaskViewerApp(
+        project / "tasks", "gimle-example", groom_cmd=[sys.executable, str(stub)]
+    )
+    async with app.run_test() as pilot:
+        await pilot.press("R")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        # The agent ran in the project root...
+        assert (project / "GROOMED").exists()
+        # ...and the app returned to a non-grooming state.
+        assert app._grooming is False
+        assert "reviewing" not in app.sub_title
 
 
 @pytest.mark.asyncio

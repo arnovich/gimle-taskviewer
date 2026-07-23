@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from rich.markup import escape
+from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.widgets import Footer, Header, Label, ListItem, ListView, Markdown
 
 from .discovery import STATES, Task, load_tasks
+from .groom import GroomResult, run_groom
 from .state_ops import StateChangeError, set_state
 
 _PRIORITY_STYLE = {
@@ -73,6 +76,7 @@ class TaskViewerApp(App):
         Binding("tab", "focus_next", "Switch pane", show=True),
         Binding("shift+tab", "focus_previous", "Switch pane", show=False),
         Binding("c", "work_on_task", "Work (Claude)", show=True),
+        Binding("R", "groom", "Review all", show=True),
         Binding("g", "mark_ongoing", "Ongoing", show=False),
         Binding("x", "mark_done", "Done", show=True),
         Binding("u", "mark_open", "Reopen", show=False),
@@ -88,12 +92,15 @@ class TaskViewerApp(App):
         tasks_dir: Path,
         project_name: str,
         claude_cmd: list[str] | None = None,
+        groom_cmd: list[str] | None = None,
     ) -> None:
         super().__init__()
         self._tasks_dir = tasks_dir
         self._project_name = project_name
         self._claude_cmd = claude_cmd or ["claude"]
+        self._groom_cmd = groom_cmd or ["claude", "-p", "--dangerously-skip-permissions"]
         self._show_closed = False
+        self._grooming = False
         self._tasks: list[Task] = []
 
     def compose(self) -> ComposeResult:
@@ -144,6 +151,24 @@ class TaskViewerApp(App):
         self._launch_claude(task, new_path)
         self._refresh_tasks(keep_selection=True)
 
+    def action_groom(self) -> None:
+        """Kick off a background Claude Code pass to review/tidy all tasks."""
+        if self._grooming:
+            self.notify("A task review is already running…")
+            return
+        binary = self._groom_cmd[0]
+        if shutil.which(binary) is None:
+            self.notify(
+                f"'{binary}' not found on PATH — set --groom-cmd or $TV_GROOM_CMD.",
+                severity="error",
+                timeout=6,
+            )
+            return
+        self._grooming = True
+        self._update_subtitle()
+        self.notify("Task review started in the background — keep browsing.")
+        self._run_groom_worker()
+
     def action_cursor_down(self) -> None:
         self.query_one(TaskListView).action_cursor_down()
 
@@ -151,6 +176,45 @@ class TaskViewerApp(App):
         self.query_one(TaskListView).action_cursor_up()
 
     # --- data / rendering ------------------------------------------------
+
+    def _update_subtitle(self) -> None:
+        counts = {state: 0 for state in STATES}
+        for task in self._tasks:
+            counts[task.state] = counts.get(task.state, 0) + 1
+        scope = "all" if self._show_closed else "active"
+        breakdown = " · ".join(
+            f"{counts[s]} {s}" for s in STATES if counts[s] or not self._show_closed
+        )
+        subtitle = f"{len(self._tasks)} tasks ({scope}) · {breakdown}"
+        if self._grooming:
+            subtitle += "  ⟳ reviewing…"
+        self.sub_title = subtitle
+
+    @work(thread=True, group="groom")
+    def _run_groom_worker(self) -> None:
+        log_path = Path(tempfile.gettempdir()) / f"tv-groom-{self._project_name}.log"
+        result = run_groom(
+            self._groom_cmd,
+            self._tasks_dir.parent,
+            self._tasks_dir.name,
+            log_path=log_path,
+        )
+        self.call_from_thread(self._on_groom_finished, result)
+
+    def _on_groom_finished(self, result: GroomResult) -> None:
+        self._grooming = False
+        self._refresh_tasks(keep_selection=True)
+        if result.returncode == 0:
+            self.notify("Task review complete — showing the summary.", timeout=6)
+            report = result.output.strip() or "*The review made no changes.*"
+            self.query_one(Markdown).update(f"# Task review\n\n{report}")
+        else:
+            where = f" See `{result.log_path}`." if result.log_path else ""
+            self.notify(
+                f"Task review exited with code {result.returncode}.{where}",
+                severity="warning",
+                timeout=8,
+            )
 
     def _current_task(self) -> Task | None:
         index = self.query_one(TaskListView).index
@@ -213,14 +277,7 @@ class TaskViewerApp(App):
         for task in self._tasks:
             list_view.append(ListItem(Label(_format_row(task))))
 
-        counts = {state: 0 for state in STATES}
-        for task in self._tasks:
-            counts[task.state] = counts.get(task.state, 0) + 1
-        scope = "all" if self._show_closed else "active"
-        breakdown = " · ".join(
-            f"{counts[s]} {s}" for s in STATES if counts[s] or not self._show_closed
-        )
-        self.sub_title = f"{len(self._tasks)} tasks ({scope}) · {breakdown}"
+        self._update_subtitle()
 
         new_index = _restore_index(self._tasks, previous_id)
         if self._tasks:
