@@ -58,6 +58,7 @@ cd my-project
 tv               # finds the nearest enclosing tasks/ folder
 tv ../other-project   # or point it somewhere explicitly
 tv -f issues     # look for an issues/ folder instead of tasks/
+tv ~/code        # a workspace root -> browse projects (see below)
 ```
 
 `tv` walks up from the given directory (default: the current one) to the
@@ -65,12 +66,31 @@ nearest `tasks/` folder, so it works from anywhere inside a project. Use
 `-f`/`--folder NAME` if your project calls that folder something other than
 `tasks` (it still needs `open/` and `closed/` subfolders).
 
+## Browsing a workspace of projects
+
+If you run `tv` from a folder that has no tasks of its own but whose child
+folders are projects (e.g. `~/code` containing many repos), the left pane lists
+those child projects instead, with their active-task counts:
+
+```
+project · code
+─────────────────────
+  my-api        7 active
+  my-web        3 active
+  toolkit       0 active
+```
+
+Press `→` (or `Enter`) to step into a project and see its task list; press `←`
+to step back out to the project list. Everything else works the same once
+you're inside a project.
+
 ## Keys
 
 | Key        | Action                                             |
 | ---------- | -------------------------------------------------- |
 | `↑` / `↓`  | Move in the list / scroll the markdown             |
 | `j` / `k`  | Move down / up in the list                         |
+| `→` / `←`  | Enter a project / step back to the project list (workspace mode) |
 | `Tab`      | Switch focus between the two panes                 |
 | `c`        | **Work on the task with Claude Code** (see below)  |
 | `R`        | **Review all tasks** with Claude Code, in the background (see below) |

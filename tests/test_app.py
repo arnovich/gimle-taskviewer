@@ -13,7 +13,7 @@ from task_viewer.app import TaskListView, TaskViewerApp
 
 @pytest.mark.asyncio
 async def test_app_lists_tasks_and_renders_selection(project: Path) -> None:
-    app = TaskViewerApp(project / "tasks", "gimle-example")
+    app = TaskViewerApp.single(project / "tasks", "gimle-example")
     async with app.run_test() as pilot:
         list_view = app.query_one(TaskListView)
         # Active (open + ongoing) by default: 3 open tasks in the fixture.
@@ -33,7 +33,7 @@ async def test_app_lists_tasks_and_renders_selection(project: Path) -> None:
 @pytest.mark.asyncio
 async def test_mark_ongoing_then_done_moves_task(project: Path) -> None:
     tasks_dir = project / "tasks"
-    app = TaskViewerApp(tasks_dir, "gimle-example")
+    app = TaskViewerApp.single(tasks_dir, "gimle-example")
     async with app.run_test() as pilot:
         list_view = app.query_one(TaskListView)
         list_view.index = 0  # first active task
@@ -61,7 +61,7 @@ async def test_background_groom_runs_and_shows_report(
         "open(os.path.join(os.getcwd(), 'GROOMED'), 'w').close()\n"
         "sys.stdout.write('- 052: raised priority to high\\n')\n"
     )
-    app = TaskViewerApp(
+    app = TaskViewerApp.single(
         project / "tasks", "gimle-example", groom_cmd=[sys.executable, str(stub)]
     )
     async with app.run_test() as pilot:
@@ -77,7 +77,7 @@ async def test_background_groom_runs_and_shows_report(
 
 @pytest.mark.asyncio
 async def test_tab_switches_focus(project: Path) -> None:
-    app = TaskViewerApp(project / "tasks", "gimle-example")
+    app = TaskViewerApp.single(project / "tasks", "gimle-example")
     async with app.run_test() as pilot:
         assert isinstance(app.focused, TaskListView)
         await pilot.press("tab")

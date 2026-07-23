@@ -58,11 +58,34 @@ def find_tasks_dir(start: Path, folder_name: str = "tasks") -> Path:
     candidates = [start, *start.parents] if start.is_dir() else list(start.parents)
     for directory in candidates:
         tasks = directory / folder_name
-        if tasks.is_dir() and _looks_like_tasks_dir(tasks):
+        if is_tasks_dir(tasks):
             return tasks
     raise TasksNotFoundError(
-        f"No {folder_name}/ folder with open|closed subfolders found from {start}"
+        f"No {folder_name}/ folder with open|ongoing|closed subfolders "
+        f"found from {start}"
     )
+
+
+def is_tasks_dir(path: Path) -> bool:
+    """True if ``path`` is a tasks folder (has an open/ongoing/closed subdir)."""
+    return path.is_dir() and any((path / state).is_dir() for state in STATES)
+
+
+def count_states(tasks_dir: Path) -> dict[str, int]:
+    """Cheap per-state entry counts (no frontmatter parsing), for summaries."""
+    counts: dict[str, int] = {}
+    for state in STATES:
+        state_dir = tasks_dir / state
+        counts[state] = (
+            sum(1 for entry in state_dir.iterdir() if _is_task_entry(entry))
+            if state_dir.is_dir()
+            else 0
+        )
+    return counts
+
+
+def _is_task_entry(entry: Path) -> bool:
+    return (entry.is_file() and entry.suffix == ".md") or entry.is_dir()
 
 
 def load_tasks(tasks_dir: Path, states: tuple[str, ...] = STATES) -> list[Task]:
@@ -78,10 +101,6 @@ def load_tasks(tasks_dir: Path, states: tuple[str, ...] = STATES) -> list[Task]:
                 tasks.append(task)
     tasks.sort(key=lambda t: (t.sort_key, STATES.index(t.state)))
     return tasks
-
-
-def _looks_like_tasks_dir(tasks: Path) -> bool:
-    return any((tasks / state).is_dir() for state in STATES)
 
 
 def _load_entry(entry: Path, state: str) -> Task | None:
