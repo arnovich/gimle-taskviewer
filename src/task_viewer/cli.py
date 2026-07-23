@@ -20,7 +20,14 @@ def main(argv: list[str] | None = None) -> int:
         nargs="?",
         default=".",
         help="Project directory to start from (default: current directory). "
-        "The nearest enclosing tasks/ folder is used.",
+        "The nearest enclosing tasks folder is used.",
+    )
+    parser.add_argument(
+        "-f",
+        "--folder",
+        default="tasks",
+        metavar="NAME",
+        help="Name of the tasks folder to look for (default: tasks).",
     )
     args = parser.parse_args(argv)
 
@@ -30,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        tasks_dir = find_tasks_dir(start)
+        tasks_dir = find_tasks_dir(start, args.folder)
     except TasksNotFoundError as error:
         print(f"tv: {error}", file=sys.stderr)
         return 1

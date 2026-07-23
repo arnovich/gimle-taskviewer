@@ -54,10 +54,13 @@ This puts a `tv` command on your PATH.
 cd my-project
 tv               # finds the nearest enclosing tasks/ folder
 tv ../other-project   # or point it somewhere explicitly
+tv -f issues     # look for an issues/ folder instead of tasks/
 ```
 
 `tv` walks up from the given directory (default: the current one) to the
-nearest `tasks/` folder, so it works from anywhere inside a project.
+nearest `tasks/` folder, so it works from anywhere inside a project. Use
+`-f`/`--folder NAME` if your project calls that folder something other than
+`tasks` (it still needs `open/` and `closed/` subfolders).
 
 ## Keys
 

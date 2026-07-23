@@ -48,20 +48,20 @@ class Task:
         return (number, self.task_id)
 
 
-def find_tasks_dir(start: Path) -> Path:
-    """Walk up from ``start`` to the nearest directory containing ``tasks/``.
+def find_tasks_dir(start: Path, folder_name: str = "tasks") -> Path:
+    """Walk up from ``start`` to the nearest directory containing ``folder_name``.
 
-    The returned path is the ``tasks/`` directory itself. Raises
+    The returned path is the tasks folder itself. Raises
     :class:`TasksNotFoundError` if none is found up to the filesystem root.
     """
     start = start.resolve()
     candidates = [start, *start.parents] if start.is_dir() else list(start.parents)
     for directory in candidates:
-        tasks = directory / "tasks"
+        tasks = directory / folder_name
         if tasks.is_dir() and _looks_like_tasks_dir(tasks):
             return tasks
     raise TasksNotFoundError(
-        f"No tasks/ folder with open|closed subfolders found from {start}"
+        f"No {folder_name}/ folder with open|closed subfolders found from {start}"
     )
 
 

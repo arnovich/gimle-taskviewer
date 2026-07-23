@@ -24,6 +24,16 @@ def test_find_tasks_dir_raises_when_absent(tmp_path: Path) -> None:
         find_tasks_dir(tmp_path)
 
 
+def test_find_tasks_dir_custom_folder_name(tmp_path: Path) -> None:
+    root = tmp_path / "proj"
+    (root / "issues" / "open").mkdir(parents=True)
+    (root / "issues" / "open" / "001-thing.md").write_text("# Thing\n")
+    assert find_tasks_dir(root, "issues") == root / "issues"
+    # Default name is not found when the folder is called something else.
+    with pytest.raises(TasksNotFoundError):
+        find_tasks_dir(root)
+
+
 def test_load_open_only(project: Path) -> None:
     tasks = load_tasks(project / "tasks", ("open",))
     assert all(t.state == "open" for t in tasks)
