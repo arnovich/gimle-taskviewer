@@ -73,6 +73,7 @@ nearest `tasks/` folder, so it works from anywhere inside a project. Use
 | `j` / `k`  | Move down / up in the list                         |
 | `Tab`      | Switch focus between the two panes                 |
 | `c`        | **Work on the task with Claude Code** (see below)  |
+| `R`        | **Review all tasks** with Claude Code, in the background (see below) |
 | `g`        | Mark the task ongoing                              |
 | `x`        | Mark the task done (move to `closed/`)             |
 | `u`        | Reopen the task (move back to `open/`)             |
@@ -100,6 +101,27 @@ The launch command defaults to `claude`. Override it with `--claude-cmd` or the
 
 ```sh
 tv --claude-cmd "claude --model opus"
+```
+
+## Reviewing all tasks in the background
+
+Press `R` and `tv` launches a **headless** Claude Code pass over the whole
+tracker while you keep browsing (the subtitle shows `⟳ reviewing…`). The agent
+reconciles each file's `state:` with its folder, moves mis-filed tasks between
+`open`/`ongoing`/`closed`, sets sensible priorities, and merges or closes stale
+duplicates — directly on disk. When it finishes, the list reloads and its
+summary appears in the right pane.
+
+By default this runs `claude -p --dangerously-skip-permissions` so the agent can
+edit and move files unattended. It operates only on your task files and every
+change is git-reversible — **run it in a git repo** so you can review the diff
+(`git diff`) and undo with `git checkout` if needed. Override the command with
+`--groom-cmd` or `$TV_GROOM_CMD`.
+
+You can also run one pass from the shell without opening the TUI:
+
+```sh
+tv --groom            # review this project's tasks and exit
 ```
 
 ## Development
