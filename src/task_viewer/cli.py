@@ -12,6 +12,7 @@ from pathlib import Path
 from .app import TaskViewerApp
 from .discovery import TasksNotFoundError, find_tasks_dir
 from .groom import DEFAULT_GROOM_CMD, run_groom
+from .workspace import find_projects
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -68,23 +69,47 @@ def main(argv: list[str] | None = None) -> int:
         print(f"tv: path does not exist: {start}", file=sys.stderr)
         return 2
 
+    # A project encloses `start` (single-project mode), or `start` is a
+    # workspace whose child folders are projects (project-browser mode).
     try:
         tasks_dir = find_tasks_dir(start, args.folder)
-    except TasksNotFoundError as error:
-        print(f"tv: {error}", file=sys.stderr)
+    except TasksNotFoundError:
+        tasks_dir = None
+
+    if tasks_dir is not None:
+        if args.groom:
+            return _run_groom_headless(groom_cmd, tasks_dir)
+        project_name = tasks_dir.parent.name
+        app = TaskViewerApp.single(tasks_dir, project_name, claude_cmd, groom_cmd)
+        app.run()
+        return 0
+
+    projects = find_projects(start, args.folder)
+    if not projects:
+        print(
+            f"tv: no {args.folder}/ folder found from {start.resolve()}, "
+            f"and no child project has one either.",
+            file=sys.stderr,
+        )
         return 1
-
     if args.groom:
-        if shutil.which(groom_cmd[0]) is None:
-            print(f"tv: {groom_cmd[0]!r} not found on PATH", file=sys.stderr)
-            return 1
-        print(f"Reviewing tasks in {tasks_dir} with: {' '.join(groom_cmd)}\n")
-        result = run_groom(groom_cmd, tasks_dir.parent, tasks_dir.name, capture=False)
-        return 0 if result.returncode == 0 else 1
+        print("tv: --groom must be run from inside a project", file=sys.stderr)
+        return 2
 
-    project_name = tasks_dir.parent.name
-    TaskViewerApp(tasks_dir, project_name, claude_cmd, groom_cmd).run()
+    TaskViewerApp(
+        projects, start.resolve().name, workspace=True,
+        claude_cmd=claude_cmd, groom_cmd=groom_cmd,
+    ).run()
     return 0
+
+
+def _run_groom_headless(groom_cmd: list[str], tasks_dir: Path) -> int:
+    if shutil.which(groom_cmd[0]) is None:
+        print(f"tv: {groom_cmd[0]!r} not found on PATH", file=sys.stderr)
+        return 1
+    print(f"Reviewing tasks in {tasks_dir} with: {' '.join(groom_cmd)}\n")
+    result = run_groom(groom_cmd, tasks_dir.parent, tasks_dir.name, capture=False)
+    return 0 if result.returncode == 0 else 1
 
 
 if __name__ == "__main__":
