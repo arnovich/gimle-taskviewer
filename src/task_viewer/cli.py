@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -29,7 +31,19 @@ def main(argv: list[str] | None = None) -> int:
         metavar="NAME",
         help="Name of the tasks folder to look for (default: tasks).",
     )
+    parser.add_argument(
+        "--claude-cmd",
+        default=os.environ.get("TV_CLAUDE_CMD", "claude"),
+        metavar="CMD",
+        help="Command used to launch Claude Code on a task "
+        "(default: claude, or $TV_CLAUDE_CMD).",
+    )
     args = parser.parse_args(argv)
+
+    claude_cmd = shlex.split(args.claude_cmd)
+    if not claude_cmd:
+        print("tv: --claude-cmd is empty", file=sys.stderr)
+        return 2
 
     start = Path(args.path).expanduser()
     if not start.exists():
@@ -43,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     project_name = tasks_dir.parent.name
-    TaskViewerApp(tasks_dir, project_name).run()
+    TaskViewerApp(tasks_dir, project_name, claude_cmd).run()
     return 0
 
 

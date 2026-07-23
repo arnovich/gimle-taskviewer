@@ -32,6 +32,9 @@ priority: low
 Body of the task...
 ```
 
+Tasks move through three states, one per subfolder: `open/` → `ongoing/` →
+`closed/`. `tv` shows the active ones (open + ongoing) by default.
+
 Everything except the file itself is optional: if there's no frontmatter, the
 title falls back to the first `# heading` and then to the filename. A task can
 also be a *directory* of markdown fragments (`description.md`, `spec.md`,
@@ -69,12 +72,35 @@ nearest `tasks/` folder, so it works from anywhere inside a project. Use
 | `↑` / `↓`  | Move in the list / scroll the markdown             |
 | `j` / `k`  | Move down / up in the list                         |
 | `Tab`      | Switch focus between the two panes                 |
-| `o`        | Toggle showing closed tasks (open-only by default) |
+| `c`        | **Work on the task with Claude Code** (see below)  |
+| `g`        | Mark the task ongoing                              |
+| `x`        | Mark the task done (move to `closed/`)             |
+| `u`        | Reopen the task (move back to `open/`)             |
+| `o`        | Toggle showing closed tasks (active-only by default) |
 | `r`        | Reload tasks from disk                             |
 | `q`        | Quit                                               |
 
 Task priority is colour-coded in the list (high = red, medium = yellow,
-low = dim); `○` marks an open task, `●` a closed one.
+low = dim); `○` marks an open task, `◐` ongoing, `●` closed.
+
+## Working on a task with Claude Code
+
+Press `c` on a task and `tv` will:
+
+1. Mark it **ongoing** (move it to `tasks/ongoing/` and sync its `state:`
+   frontmatter), then
+2. suspend the TUI and launch [Claude Code](https://claude.com/claude-code) in
+   the project root, seeded with a prompt that points at the task spec.
+
+When you exit Claude Code you drop straight back into `tv`. If the task is
+finished, press `x` to mark it done.
+
+The launch command defaults to `claude`. Override it with `--claude-cmd` or the
+`TV_CLAUDE_CMD` environment variable, e.g. to pin a model:
+
+```sh
+tv --claude-cmd "claude --model opus"
+```
 
 ## Development
 

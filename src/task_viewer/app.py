@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
 from rich.markup import escape
@@ -11,12 +13,18 @@ from textual.containers import VerticalScroll
 from textual.widgets import Footer, Header, Label, ListItem, ListView, Markdown
 
 from .discovery import STATES, Task, load_tasks
+from .state_ops import StateChangeError, set_state
 
 _PRIORITY_STYLE = {
     "high": "bold red",
     "medium": "yellow",
     "low": "dim",
 }
+
+# Active states are shown by default; closed is folded in with the `o` toggle.
+_ACTIVE_STATES = ("open", "ongoing")
+
+_STATE_MARK = {"open": "○", "ongoing": "◐", "closed": "●"}
 
 _EMPTY_BODY = "*Select a task on the left. Press `Tab` to move between panes.*"
 
@@ -64,17 +72,27 @@ class TaskViewerApp(App):
     BINDINGS = [
         Binding("tab", "focus_next", "Switch pane", show=True),
         Binding("shift+tab", "focus_previous", "Switch pane", show=False),
-        Binding("o", "toggle_closed", "Open/all", show=True),
-        Binding("r", "reload", "Reload", show=True),
+        Binding("c", "work_on_task", "Work (Claude)", show=True),
+        Binding("g", "mark_ongoing", "Ongoing", show=False),
+        Binding("x", "mark_done", "Done", show=True),
+        Binding("u", "mark_open", "Reopen", show=False),
+        Binding("o", "toggle_closed", "Show closed", show=True),
+        Binding("r", "reload", "Reload", show=False),
         Binding("q", "quit", "Quit", show=True),
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
     ]
 
-    def __init__(self, tasks_dir: Path, project_name: str) -> None:
+    def __init__(
+        self,
+        tasks_dir: Path,
+        project_name: str,
+        claude_cmd: list[str] | None = None,
+    ) -> None:
         super().__init__()
         self._tasks_dir = tasks_dir
         self._project_name = project_name
+        self._claude_cmd = claude_cmd or ["claude"]
         self._show_closed = False
         self._tasks: list[Task] = []
 
@@ -99,6 +117,33 @@ class TaskViewerApp(App):
     def action_reload(self) -> None:
         self._refresh_tasks(keep_selection=True)
 
+    def action_mark_ongoing(self) -> None:
+        self._change_state("ongoing")
+
+    def action_mark_done(self) -> None:
+        self._change_state("closed")
+
+    def action_mark_open(self) -> None:
+        self._change_state("open")
+
+    def action_work_on_task(self) -> None:
+        """Mark the selected task ongoing, then launch Claude Code on it."""
+        task = self._current_task()
+        if task is None:
+            return
+        binary = self._claude_cmd[0]
+        if shutil.which(binary) is None:
+            self.notify(
+                f"'{binary}' not found on PATH — set --claude-cmd or $TV_CLAUDE_CMD.",
+                severity="error",
+                timeout=6,
+            )
+            return
+
+        new_path = self._change_state("ongoing", notify=False) or task.path
+        self._launch_claude(task, new_path)
+        self._refresh_tasks(keep_selection=True)
+
     def action_cursor_down(self) -> None:
         self.query_one(TaskListView).action_cursor_down()
 
@@ -107,8 +152,55 @@ class TaskViewerApp(App):
 
     # --- data / rendering ------------------------------------------------
 
+    def _current_task(self) -> Task | None:
+        index = self.query_one(TaskListView).index
+        if index is not None and 0 <= index < len(self._tasks):
+            return self._tasks[index]
+        return None
+
+    def _change_state(self, new_state: str, *, notify: bool = True) -> Path | None:
+        """Move the selected task to ``new_state``; return its new path."""
+        task = self._current_task()
+        if task is None:
+            return None
+        if task.state == new_state:
+            if notify:
+                self.notify(f"{task.task_id} is already {new_state}.")
+            return task.path
+        try:
+            new_path = set_state(task, new_state, self._tasks_dir)
+        except StateChangeError as error:
+            self.notify(str(error), severity="error", timeout=6)
+            return None
+        if notify:
+            self.notify(f"{task.task_id} → {new_state}")
+        self._refresh_tasks(keep_selection=True)
+        return new_path
+
+    def _launch_claude(self, task: Task, path: Path) -> None:
+        """Suspend the TUI and run Claude Code on the task in the project root."""
+        project_root = self._tasks_dir.parent
+        try:
+            spec = path.relative_to(project_root)
+        except ValueError:
+            spec = path
+        prompt = (
+            "Please work on this task from the project's task tracker.\n\n"
+            f"Task: {task.title}\n"
+            f"Spec file: {spec}\n\n"
+            f"Read {spec} in full for the details, then plan and implement it. "
+            "The task has been marked as ongoing (moved to tasks/ongoing/); "
+            "when it's complete, say so and I'll mark it done."
+        )
+        with self.suspend():
+            try:
+                subprocess.run([*self._claude_cmd, prompt], cwd=project_root)
+            except FileNotFoundError:
+                print(f"tv: could not run {self._claude_cmd[0]!r}.")
+                input("Press Enter to return to tv...")
+
     def _refresh_tasks(self, *, keep_selection: bool) -> None:
-        states = STATES if self._show_closed else ("open",)
+        states = STATES if self._show_closed else _ACTIVE_STATES
         previous_id = None
         if keep_selection and self._tasks:
             index = self.query_one(TaskListView).index
@@ -121,9 +213,14 @@ class TaskViewerApp(App):
         for task in self._tasks:
             list_view.append(ListItem(Label(_format_row(task))))
 
-        open_count = sum(1 for t in self._tasks if t.state == "open")
-        scope = "open + closed" if self._show_closed else "open"
-        self.sub_title = f"{len(self._tasks)} tasks ({scope}) · {open_count} open"
+        counts = {state: 0 for state in STATES}
+        for task in self._tasks:
+            counts[task.state] = counts.get(task.state, 0) + 1
+        scope = "all" if self._show_closed else "active"
+        breakdown = " · ".join(
+            f"{counts[s]} {s}" for s in STATES if counts[s] or not self._show_closed
+        )
+        self.sub_title = f"{len(self._tasks)} tasks ({scope}) · {breakdown}"
 
         new_index = _restore_index(self._tasks, previous_id)
         if self._tasks:
@@ -147,7 +244,7 @@ class TaskViewerApp(App):
 
 def _format_row(task: Task) -> str:
     """Rich-markup label for one list row: state, priority, title."""
-    mark = "○" if task.state == "open" else "●"
+    mark = _STATE_MARK.get(task.state, "○")
     style = _PRIORITY_STYLE.get((task.priority or "").lower(), "")
     title = escape(task.title)
     body = f"[{style}]{title}[/]" if style else title

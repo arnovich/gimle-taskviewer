@@ -14,8 +14,8 @@ from pathlib import Path
 
 import yaml
 
-# States map one-to-one onto the subdirectories of ``tasks/``.
-STATES = ("open", "closed")
+# States map one-to-one onto the subdirectories of ``tasks/``, in lifecycle order.
+STATES = ("open", "ongoing", "closed")
 
 # Order to concatenate fragments of a directory-style task, most-relevant first.
 _FRAGMENT_ORDER = ("description.md", "spec.md", "plan.md")
