@@ -1,0 +1,44 @@
+"""Command-line entry point for ``tv``."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from .app import TaskViewerApp
+from .discovery import TasksNotFoundError, find_tasks_dir
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="tv",
+        description="Browse a gimle project's markdown tasks in a terminal UI.",
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default=".",
+        help="Project directory to start from (default: current directory). "
+        "The nearest enclosing tasks/ folder is used.",
+    )
+    args = parser.parse_args(argv)
+
+    start = Path(args.path).expanduser()
+    if not start.exists():
+        print(f"tv: path does not exist: {start}", file=sys.stderr)
+        return 2
+
+    try:
+        tasks_dir = find_tasks_dir(start)
+    except TasksNotFoundError as error:
+        print(f"tv: {error}", file=sys.stderr)
+        return 1
+
+    project_name = tasks_dir.parent.name
+    TaskViewerApp(tasks_dir, project_name).run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
