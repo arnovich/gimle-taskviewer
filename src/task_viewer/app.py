@@ -414,10 +414,11 @@ class TaskViewerApp(App):
                 previous_id = self._tasks[index].task_id
 
         self._tasks = load_tasks(self._tasks_dir, states)
+        number_width = _number_width(self._tasks)
         list_view = self.query_one(TaskListView)
         list_view.clear()
         for task in self._tasks:
-            list_view.append(ListItem(Label(_format_row(task))))
+            list_view.append(ListItem(Label(_format_row(task, number_width))))
 
         self._update_subtitle()
 
@@ -475,20 +476,27 @@ class TaskViewerApp(App):
         if active:
             lines += ["", "## Active tasks", ""]
             for task in active[:25]:
-                lines.append(f"- {_STATE_MARK[task.state]} {task.title}")
+                number = f"`{task.number}` " if task.number else ""
+                lines.append(f"- {_STATE_MARK[task.state]} {number}{task.title}")
             if len(active) > 25:
                 lines.append(f"- …and {len(active) - 25} more")
         lines += ["", "*Press `→` or `Enter` to open.*"]
         self.query_one(Markdown).update("\n".join(lines))
 
 
-def _format_row(task: Task) -> str:
-    """Rich-markup label for one task row: state, priority, title."""
+def _format_row(task: Task, number_width: int) -> str:
+    """Rich-markup label for one task row: state, id number, priority, title.
+
+    ``number_width`` is the widest id number in the list; a task without one is
+    padded to the same width so every title starts in the same column.
+    """
     mark = _STATE_MARK.get(task.state, "○")
     style = _PRIORITY_STYLE.get((task.priority or "").lower(), "")
     title = escape(task.title)
     body = f"[{style}]{title}[/]" if style else title
-    return f"[dim]{mark}[/] {body}"
+    if not number_width:
+        return f"[dim]{mark}[/] {body}"
+    return f"[dim]{mark} {(task.number or '').rjust(number_width)}[/] {body}"
 
 
 def _format_project_row(project: Project, info: GitInfo | None) -> str:
@@ -535,6 +543,11 @@ def _meta_line(task: Task) -> str:
     if task.labels:
         parts.append(" ".join(f"`{label}`" for label in task.labels))
     return " · ".join(parts) + "\n\n"
+
+
+def _number_width(tasks: list[Task]) -> int:
+    """Width of the widest id number present, or 0 when none of them have one."""
+    return max((len(task.number or "") for task in tasks), default=0)
 
 
 def _index_of(names: list[str], target: str | None) -> int:

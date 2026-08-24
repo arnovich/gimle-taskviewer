@@ -6,9 +6,11 @@ import sys
 from pathlib import Path
 
 import pytest
-from textual.widgets import Markdown
+from textual.widgets import Label, Markdown
 
-from task_viewer.app import TaskListView, TaskViewerApp
+from task_viewer.app import TaskListView, TaskViewerApp, _format_row
+from task_viewer.discovery import Task
+from task_viewer.workspace import find_projects
 
 
 @pytest.mark.asyncio
@@ -82,3 +84,55 @@ async def test_tab_switches_focus(project: Path) -> None:
         assert isinstance(app.focused, TaskListView)
         await pilot.press("tab")
         assert not isinstance(app.focused, TaskListView)
+
+
+def _task(task_id: str, title: str, state: str = "open", **kw) -> Task:
+    return Task(task_id=task_id, title=title, state=state, path=Path(task_id),
+                body="", **kw)
+
+
+def test_row_shows_the_task_number() -> None:
+    row = _format_row(_task("052-heat-equation", "2D heat equation"), 3)
+    assert "052" in row
+    assert "2D heat equation" in row
+
+
+def test_rows_align_when_a_task_has_no_number() -> None:
+    """A blank-padded gap keeps every title in the same column."""
+    numbered = _format_row(_task("052-heat", "Numbered"), 3)
+    plain = _format_row(_task("add-smooth-functions", "Unnumbered"), 3)
+    assert plain.index("Unnumbered") == numbered.index("Numbered")
+
+
+def test_rows_widen_for_longer_numbers() -> None:
+    row = _format_row(_task("1234-big", "Big"), 4)
+    assert "1234" in row
+
+
+def test_row_without_numbers_in_the_list_has_no_gap() -> None:
+    row = _format_row(_task("add-smooth-functions", "Unnumbered"), 0)
+    assert row == "[dim]○[/] Unnumbered"
+
+
+@pytest.mark.asyncio
+async def test_task_list_renders_numbers(project: Path) -> None:
+    app = TaskViewerApp.single(project / "tasks", "gimle-example")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        labels = [str(label.render()) for label in app.query(Label)]
+        assert any("052" in text for text in labels)
+
+
+@pytest.mark.asyncio
+async def test_project_summary_lists_task_numbers(tmp_path: Path) -> None:
+    root = tmp_path / "gimle"
+    open_dir = root / "proj" / "tasks" / "open"
+    open_dir.mkdir(parents=True)
+    (open_dir / "052-heat-equation.md").write_text("# 2D heat equation\n")
+
+    app = TaskViewerApp(find_projects(root), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        source = app.query_one(Markdown).source
+        assert "`052`" in source
+        assert "2D heat equation" in source
