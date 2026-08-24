@@ -317,6 +317,9 @@ class TaskViewerApp(App):
             self.action_enter_project()
 
     def _enter_project(self, project: Project) -> None:
+        # The list is about to hold task rows, not project rows; forgetting them
+        # keeps the repaint-in-place path below from writing into the wrong list.
+        self._rows = []
         self._current_project = project
         self._last_project_name = project.name
         self._tasks_dir = project.tasks_dir
@@ -349,6 +352,7 @@ class TaskViewerApp(App):
 
     def _build_project_rows(self, *, keep: Path | None = None) -> None:
         """Rebuild the visible rows from the groups and what is expanded."""
+        structure = [row.project.path for row in self._rows]
         self._rows = []
         for group in self._groups:
             self._rows.append(_Row(group.project, group, is_worktree=False))
@@ -357,68 +361,66 @@ class TaskViewerApp(App):
                     self._rows.append(_Row(worktree, group, is_worktree=True))
 
         list_view = self.query_one(TaskListView)
-        # Highlight events fired while the list re-populates describe rows that
-        # are on their way out; they must not overwrite the intended selection.
-        self._rebuilding = True
-        try:
-            list_view.clear()
-            for row in self._rows:
-                list_view.append(ListItem(Label(self._row_label(row))))
-            self._update_projects_subtitle()
+        # Prefer the row the caller named; fall back to wherever the cursor
+        # already is, so a background rebuild never teleports it to the top.
+        index = None
+        for candidate in (keep, self._selected_path):
+            if candidate is None:
+                continue
+            index = next(
+                (i for i, r in enumerate(self._rows) if r.project.path == candidate),
+                None,
+            )
+            if index is not None:
+                break
+        if index is None:
+            index = 0
+        index = min(index, len(self._rows) - 1) if self._rows else 0
 
-            # Prefer the row the caller named; fall back to wherever the cursor
-            # already is, so a background rebuild never teleports it to the top.
-            index = None
-            for candidate in (keep, self._selected_path):
-                if candidate is None:
-                    continue
-                index = next(
-                    (i for i, r in enumerate(self._rows) if r.project.path == candidate),
-                    None,
-                )
-                if index is not None:
-                    break
-            if index is None:
-                index = 0
-            index = min(index, len(self._rows) - 1) if self._rows else 0
-            if self._rows:
-                self._selected_path = self._rows[index].project.path
-                # Set it now so the very next keypress acts on the right row...
-                _select(list_view, index)
-                self._show_project_summary(self._rows[index].project)
-        finally:
-            self._rebuilding = False
         if self._rows:
-            # ...and again once the list has settled, so the cursor is visible.
-            self.call_after_refresh(self._repaint_cursor, index)
+            self._selected_path = self._rows[index].project.path
 
-    def _repaint_cursor(self, index: int) -> None:  # noqa: D401 - see docstring
-        """Re-assert the highlight after ``ListView.clear()`` has pruned.
-
-        The prune is asynchronous, so the index assigned right after it lands on
-        a widget that is about to be removed and the cursor bar disappears until
-        the next keypress. Clearing the index first forces the watcher to run
-        again even when the number itself has not changed.
-        """
-        if not self._rows:
+        # Same rows, different text — the common case, since the background git
+        # scan repaints without changing what is listed. Updating labels in
+        # place is synchronous and cannot race.
+        reusable = structure and len(list_view) == len(self._rows)
+        if reusable and [row.project.path for row in self._rows] == structure:
+            self._rebuilding = True
+            try:
+                for row, label in zip(self._rows, list_view.query(Label)):
+                    label.update(self._row_label(row))
+                if self._rows:
+                    _select(list_view, index)
+            finally:
+                self._rebuilding = False
+            self._update_projects_subtitle()
+            if self._rows:
+                self._show_project_summary(self._rows[index].project)
             return
+
+        # The row set actually changed, so the list has to be rebuilt. Do it in
+        # a coroutine that AWAITS the removal: ListView.clear() prunes
+        # asynchronously, and every attempt to work around that timing rather
+        # than wait for it left the cursor bar on a widget already on its way out.
+        self.call_next(self._repopulate_rows, index)
+
+    async def _repopulate_rows(self, index: int) -> None:
+        """Replace every row, waiting for the old ones to actually be gone."""
         list_view = self.query_one(TaskListView)
-        # The rows may have been rebuilt again since this was scheduled; the
-        # tracked selection is the authority, not the index we were handed.
-        index = next(
-            (i for i, row in enumerate(self._rows)
-             if row.project.path == self._selected_path),
-            min(index, len(self._rows) - 1),
-        )
         self._rebuilding = True
         try:
-            # A row highlighted before the prune can survive it at a new
-            # position, leaving two bars lit, so clear them all first.
-            for item in list_view.query(ListItem):
-                item.highlighted = False
-            _select(list_view, index)
+            await list_view.clear()
+            await list_view.extend(
+                ListItem(Label(self._row_label(row))) for row in self._rows
+            )
+            if self._rows:
+                index = min(index, len(self._rows) - 1)
+                _select(list_view, index)
         finally:
             self._rebuilding = False
+        self._update_projects_subtitle()
+        if self._rows:
+            self._show_project_summary(self._rows[index].project)
 
     def _row_label(self, row: _Row) -> str:
         info = self._git_info.get(row.project.path)

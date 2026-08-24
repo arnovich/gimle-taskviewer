@@ -129,6 +129,7 @@ async def test_summary_pane_renders_the_git_section(worktree_workspace: Path) ->
     async with app.run_test() as pilot:
         await app.workers.wait_for_complete()
         app.query_one(TaskListView).index = 0
+        await pilot.pause()
         await pilot.press("space")  # unfold gimle-asgard
         await pilot.pause()
         app.query_one(TaskListView).index = 1  # its worktree
@@ -211,6 +212,7 @@ async def test_worktrees_are_hidden_until_the_repo_is_expanded(
         assert len(list_view) == 2
 
         list_view.index = 0
+        await pilot.pause()
         await pilot.press("space")
         await pilot.pause()
         assert len(list_view) == 3
@@ -242,9 +244,11 @@ async def test_entering_an_expanded_worktree_opens_that_worktree(
         await app.workers.wait_for_complete()
         await pilot.pause()
         app.query_one(TaskListView).index = 0
+        await pilot.pause()
         await pilot.press("space")
         await pilot.pause()
         app.query_one(TaskListView).index = 1  # the worktree row
+        await pilot.pause()
         await pilot.press("right")
         await pilot.pause()
         assert app._current_project.name == "gimle-asgard-feature"
@@ -261,9 +265,11 @@ async def test_toggling_a_worktree_row_folds_its_repo(
         await pilot.pause()
         list_view = app.query_one(TaskListView)
         list_view.index = 0
+        await pilot.pause()
         await pilot.press("space")
         await pilot.pause()
         list_view.index = 1
+        await pilot.pause()
         await pilot.press("space")
         await pilot.pause()
         assert len(list_view) == 2
@@ -320,6 +326,7 @@ async def test_the_cursor_stays_visible_after_folding(
     async with app.run_test() as pilot:
         await app.workers.wait_for_complete()
         app.query_one(TaskListView).index = 1  # gimle-asgard, which has a worktree
+        await pilot.pause()
         await pilot.press("space")
         await pilot.pause()
         assert _highlighted(app) == [1]
@@ -335,9 +342,11 @@ async def test_folding_from_a_worktree_row_lands_on_its_repo(
         await app.workers.wait_for_complete()
         list_view = app.query_one(TaskListView)
         list_view.index = 1
+        await pilot.pause()
         await pilot.press("space")
         await pilot.pause()
         list_view.index = 2  # the worktree
+        await pilot.pause()
         await pilot.press("space")
         await pilot.pause()
         assert list_view.index == 1
@@ -354,6 +363,7 @@ async def test_back_from_a_project_reselects_it(
     async with app.run_test() as pilot:
         await app.workers.wait_for_complete()
         app.query_one(TaskListView).index = 2  # gimle-mimir
+        await pilot.pause()
         await pilot.press("right")
         await pilot.pause()
         await pilot.press("left")
@@ -373,9 +383,11 @@ async def test_back_from_a_worktree_keeps_its_repo_unfolded(
         await app.workers.wait_for_complete()
         list_view = app.query_one(TaskListView)
         list_view.index = 1
+        await pilot.pause()
         await pilot.press("space")
         await pilot.pause()
         list_view.index = 2
+        await pilot.pause()
         await pilot.press("right")
         await pilot.pause()
         await pilot.press("left")
