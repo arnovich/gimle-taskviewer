@@ -10,7 +10,7 @@ from task_viewer.app import TaskListView, TaskViewerApp, _format_project_row
 from helpers import git as _git
 from textual.widgets import Label, Markdown
 from task_viewer.git_info import load_git_info
-from task_viewer.workspace import find_projects
+from task_viewer.workspace import find_projects, group_projects
 
 
 def _make_project(root: Path, name: str, open_ids: list[str]) -> None:
@@ -105,15 +105,14 @@ def test_a_project_without_git_gets_a_single_line_row(workspace: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_workspace_subtitle_counts_worktrees(worktree_workspace: Path) -> None:
+async def test_the_subtitle_does_not_wait_for_the_git_scan(
+    worktree_workspace: Path,
+) -> None:
+    """Grouping reads `.git` pointer files, so the counts are known at once."""
     projects = find_projects(worktree_workspace)
     app = TaskViewerApp(projects, "gimle", workspace=True)
-    async with app.run_test() as pilot:
-        # The git scan runs in a worker so the list paints immediately...
-        assert "worktree" not in app.sub_title
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-        # ...and the subtitle is rewritten once it lands.
+    async with app.run_test():
+        assert "2 repos" in app.sub_title
         assert "1 worktree" in app.sub_title
 
 
@@ -125,6 +124,8 @@ async def test_project_rows_are_repainted_after_the_scan(
     app = TaskViewerApp(projects, "gimle", workspace=True)
     async with app.run_test() as pilot:
         await app.workers.wait_for_complete()
+        app.query_one(TaskListView).index = 0
+        await pilot.press("space")
         await pilot.pause()
         labels = [str(label.render()) for label in app.query(Label)]
         assert any("feat/thing" in text for text in labels)
@@ -134,11 +135,13 @@ async def test_project_rows_are_repainted_after_the_scan(
 async def test_summary_pane_renders_the_git_section(worktree_workspace: Path) -> None:
     """The feature has to reach the pane, not just be computable."""
     projects = find_projects(worktree_workspace)
-    index = next(i for i, p in enumerate(projects) if p.name.endswith("-feature"))
     app = TaskViewerApp(projects, "gimle", workspace=True)
     async with app.run_test() as pilot:
         await app.workers.wait_for_complete()
-        app.query_one(TaskListView).index = index
+        app.query_one(TaskListView).index = 0
+        await pilot.press("space")  # unfold gimle-asgard
+        await pilot.pause()
+        app.query_one(TaskListView).index = 1  # its worktree
         await pilot.pause()
 
         source = app.query_one(Markdown).source
@@ -162,3 +165,135 @@ async def test_summary_pane_has_no_git_section_without_git(workspace: Path) -> N
         source = app.query_one(Markdown).source
         assert "## Worktree" not in source
         assert "## Repository" not in source
+
+
+# --- grouping worktrees under their repository ------------------------------
+
+
+def test_worktrees_nest_under_their_repository(worktree_workspace: Path) -> None:
+    groups = group_projects(find_projects(worktree_workspace))
+    names = {g.project.name: [w.name for w in g.worktrees] for g in groups}
+    assert names["gimle-asgard"] == ["gimle-asgard-feature"]
+    # The worktree is not also a top-level entry.
+    assert "gimle-asgard-feature" not in names
+
+
+def test_a_project_without_worktrees_is_its_own_group(worktree_workspace: Path) -> None:
+    groups = group_projects(find_projects(worktree_workspace))
+    mimir = next(g for g in groups if g.project.name == "gimle-mimir")
+    assert mimir.worktrees == []
+    assert mimir.has_worktrees is False
+
+
+def test_a_worktree_whose_repo_is_not_listed_stays_top_level(
+    workspace: Path,
+) -> None:
+    """Its repository has no tasks folder, so it never reaches the list."""
+    repo = workspace.parent / "outside-repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    (repo / "README.md").write_text("x\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "Initial commit")
+
+    detached = workspace / "outside-repo-feature"
+    _git(repo, "worktree", "add", "-b", "feat/thing", str(detached))
+    (detached / "tasks" / "open").mkdir(parents=True)
+    (detached / "tasks" / "open" / "001-a.md").write_text("# A\n")
+
+    groups = group_projects(find_projects(workspace))
+    assert "outside-repo-feature" in [g.project.name for g in groups]
+
+
+# --- the collapsible sidebar -----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_worktrees_are_hidden_until_the_repo_is_expanded(
+    worktree_workspace: Path,
+) -> None:
+    app = TaskViewerApp(find_projects(worktree_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        list_view = app.query_one(TaskListView)
+        # gimle-asgard (with its worktree folded away) and gimle-mimir.
+        assert len(list_view) == 2
+
+        list_view.index = 0
+        await pilot.press("space")
+        await pilot.pause()
+        assert len(list_view) == 3
+        assert any("feat/thing" in str(label.render()) for label in app.query(Label))
+
+        await pilot.press("space")
+        await pilot.pause()
+        assert len(list_view) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_collapsed_repo_says_what_it_is_hiding(
+    worktree_workspace: Path,
+) -> None:
+    app = TaskViewerApp(find_projects(worktree_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        rows = [str(label.render()) for label in app.query(Label)]
+        assert any("1 wt" in row for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_entering_an_expanded_worktree_opens_that_worktree(
+    worktree_workspace: Path,
+) -> None:
+    app = TaskViewerApp(find_projects(worktree_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        app.query_one(TaskListView).index = 0
+        await pilot.press("space")
+        await pilot.pause()
+        app.query_one(TaskListView).index = 1  # the worktree row
+        await pilot.press("right")
+        await pilot.pause()
+        assert app._current_project.name == "gimle-asgard-feature"
+
+
+@pytest.mark.asyncio
+async def test_toggling_a_worktree_row_folds_its_repo(
+    worktree_workspace: Path,
+) -> None:
+    """space on a child collapses the group it belongs to, not nothing."""
+    app = TaskViewerApp(find_projects(worktree_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        list_view = app.query_one(TaskListView)
+        list_view.index = 0
+        await pilot.press("space")
+        await pilot.pause()
+        list_view.index = 1
+        await pilot.press("space")
+        await pilot.pause()
+        assert len(list_view) == 2
+
+
+@pytest.mark.asyncio
+async def test_subtitle_counts_repos_and_worktrees(worktree_workspace: Path) -> None:
+    app = TaskViewerApp(find_projects(worktree_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "2 repos" in app.sub_title
+        assert "1 worktree" in app.sub_title
+
+
+@pytest.mark.asyncio
+async def test_toggle_is_hidden_inside_a_project(worktree_workspace: Path) -> None:
+    app = TaskViewerApp(find_projects(worktree_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        assert app.check_action("toggle_group", ()) is True
+        await pilot.press("right")
+        await pilot.pause()
+        assert app.check_action("toggle_group", ()) is None
