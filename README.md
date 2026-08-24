@@ -109,69 +109,68 @@ An **expanded** worktree is listed by its folder suffix rather than its branch �
 branch is in the right-hand pane.
 
 * `✔merged` — the base branch already holds every commit here
-* `↑n` / `↓n` — commits ahead of / behind the base branch
+* `+n` / `-n` — commits ahead of / behind **the base branch**
+* `↑n` / `↓n` — commits to **push** / to **pull** from the remote
+* `new` — never pushed; this branch exists only on this machine
+* `gone` — was pushed, then deleted upstream; the work landed and was tidied up
 * `✎n` — uncommitted changes in the working tree
 * trailing `9m` / `3w` — how long ago the checkout was last touched
+
+Two distances, two notations. `+n`/`-n` is how far you are from `main`;
+`↑n`/`↓n` is how far you are from the remote. They are deliberately different
+shapes rather than four arrows — the doubled arrows `⇡⇣` are absent from almost
+every terminal font.
 
 A row says nothing about drift when there is nothing to say: a plain clone
 sitting in sync with its remote just shows its branch and age.
 
-Press `→` (or `Enter`) to step into a project — a repo or one of its worktrees —
-and see its task list; press `←` to step back out. Everything else works the
-same once you're inside.
+## Keeping up with the remote
 
-Grouping is read from each worktree's `.git` pointer file, which costs nothing,
-so the tree is correct the instant the list paints. The git *state* is scanned
-in a background thread and fills in a moment later.
+When `tv` starts it fetches every repository in the background — one fetch per
+repo, since a worktree shares its repo's object store — so a `main` that moved
+while you were away shows up as `↓3` without you having to ask. The list paints
+first and the counts arrive a second later; the network never blocks the UI,
+and an unreachable remote fails immediately rather than waiting out a timeout.
 
-## Keeping track of worktrees
+| Key | Action |
+| --- | ------ |
+| `f` | Fetch every repo again now |
+| `u` | Fetch, then fast-forward the highlighted project |
 
-A workspace like `~/gimle` is mostly *worktrees* — one repository checked out
-many times, one branch per line of work. Highlighting a project shows the full
-picture in the right pane:
-
-```
-## Worktree
-
-`task/140-derivative-augmented-token-features` · worktree of `gimle-mimir`
-
-- **Created** 2026-07-30 00:22 (3w ago)
-- **Updated** 2026-07-30 00:53 (3w ago)
-- **Base** `main` · **2 ahead** · 221 behind
-
-### 2 commits not in `main`
-
-- Address panel review: scope version bump, sanitize derivatives, tests
-- Add derivative/phase-space augmented encoder input features (task 140)
-```
-
-* **Created** — when `git worktree add` made this worktree. A plain clone has no
-  such marker, so it reports **Branch since** instead: when the current branch
-  started, per the reflog. If the reflog has been trimmed by `gc.reflogExpire`
-  its oldest entry is just an old `pull`, not a birth — that reports `unknown`
-  rather than a confidently wrong date.
-* **Updated** — the most recent of the last commit and any uncommitted edit, so
-  a worktree with live but uncommitted work doesn't read as stale.
-* **Base** — drift against the first of `main`, `origin/main`, `master`,
-  `origin/master` that exists and isn't the branch you're standing on. Sitting
-  on `main` therefore compares against `origin/main`, showing unpushed work.
-  Fully-qualified refs are used, so a *tag* named `main` can't skew the counts.
-
-When a worktree is fully merged the pane says so instead of listing drift — and
-if it still holds uncommitted files, it warns, because those exist nowhere else
-and removing the worktree would lose them:
+`u` fetches first — "already up to date" measured against hour-old refs is
+worthless — then fast-forwards. It will not create a merge commit and cannot
+leave you with conflicts. It declines, and says why, in every case it is not
+certain:
 
 ```
-- **Merged** fully into `main` — nothing of its own left
-
-> ⚠ Merged, but 10 files here are uncommitted — they exist nowhere else.
+proj: fast-forwarded 3 commits
+proj: 5 uncommitted files — commit or stash first
+proj: would overwrite ignored .env — move them aside first
+proj: tracks `origin/main`, not a branch of its own —
+      updating would move it onto that branch
+proj: origin/feat/x no longer exists on the remote
 ```
 
-A detached HEAD (mid-rebase, mid-bisect, on a tag) is shown as
-`detached at abc1234` rather than hidden.
+That third one is not theoretical: `--ff-only` protects *tracked* files, but
+git will silently overwrite a file it has been told to ignore, and a local
+`.env` lives nowhere else. The fourth matters in a worktree-per-task workspace —
+`git worktree add -b` inherits the upstream of the branch it was cut from, so a
+task branch commonly tracks `origin/main`, and "updating" it would move it onto
+main and lose what it was branched for. `tv` refuses instead.
 
-Only child folders that have a tasks folder are listed, so a worktree without
-one won't appear.
+When it does succeed the task list reloads, since the tasks arrived with the
+commits.
+
+The right pane always says when the remote was last contacted:
+
+```
+- **Remote** `origin/main` · **3 commits to pull** — press `u` · checked 2h ago
+- **Remote** `origin/main` · up to date · **could not reach the remote** — counts may be stale
+```
+
+That "checked" is doing real work: `up to date` can only ever mean *as of the
+last fetch*. A **failed** fetch still updates git's own `FETCH_HEAD` timestamp,
+so `tv` tracks which remotes it actually reached rather than trusting that file.
 
 ## Keys
 
@@ -181,6 +180,8 @@ one won't appear.
 | `j` / `k`  | Move down / up in the list                         |
 | `→` / `←`  | Enter a project / step back to the project list (workspace mode) |
 | `space`    | Fold or unfold a repo's worktrees (workspace mode)  |
+| `f`        | Fetch all repos from their remotes (workspace mode) |
+| `u`        | Fast-forward the highlighted project (workspace mode) |
 | `Tab`      | Switch focus between the two panes                 |
 | `c`        | **Work on the task with Claude Code** (see below)  |
 | `R`        | **Review all tasks** with Claude Code, in the background (see below) |

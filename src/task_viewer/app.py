@@ -13,6 +13,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,8 +25,15 @@ from textual.containers import VerticalScroll
 from textual.widgets import Footer, Header, Label, ListItem, ListView, Markdown
 
 from .discovery import STATES, Task, count_states, load_tasks
-from .git_info import GitInfo, describe_age, format_moment, load_git_info
+from .git_info import (
+    GitInfo,
+    describe_age,
+    describe_age_phrase,
+    format_moment,
+    load_git_info,
+)
 from .groom import GroomResult, run_groom
+from .remote import UpdateResult, cancel_all, fast_forward, fetch
 from .state_ops import StateChangeError, set_state
 from .workspace import Project, ProjectGroup, group_projects
 
@@ -119,6 +127,8 @@ class TaskViewerApp(App):
         Binding("l", "enter_project", "Open", show=False),
         Binding("h", "back", "Projects", show=False),
         Binding("space", "toggle_group", "Fold", show=True),
+        Binding("f", "fetch", "Fetch", show=True),
+        Binding("u", "update", "Update", show=True),
         Binding("c", "work_on_task", "Work (Claude)", show=True),
         Binding("R", "groom", "Review all", show=True),
         Binding("g", "mark_ongoing", "Ongoing", show=False),
@@ -156,6 +166,9 @@ class TaskViewerApp(App):
         self._groups = group_projects(projects) if workspace else []
         self._rows: list[_Row] = []
         self._expanded: set[Path] = set()
+        self._fetching = False
+        self._unreachable: set[Path] = set()
+        self._updating = False
 
     @classmethod
     def single(
@@ -186,12 +199,18 @@ class TaskViewerApp(App):
             self._enter_project(self._projects[0])
         self.query_one(TaskListView).focus()
 
+    def on_unmount(self) -> None:
+        """Kill any in-flight git child so `q` never waits on the network."""
+        cancel_all()
+
     def check_action(self, action: str, parameters: tuple[object, ...]):
         """Hide keys that don't apply at the current navigation level."""
         if action == "enter_project":
             return True if self._level == "projects" else None
         if action == "back":
             return True if self._level == "tasks" and self._workspace else None
+        if action in ("fetch", "update"):
+            return True if self._level == "projects" else None
         if action == "toggle_group":
             # Advertising a key that does nothing on this row reads as a bug.
             row = self._current_row()
@@ -220,6 +239,56 @@ class TaskViewerApp(App):
             self._expanded.add(key)
         self._build_project_rows(keep=key)
 
+    def action_fetch(self) -> None:
+        """Ask every remote what it has, then repaint."""
+        if self._level != "projects" or self._fetching:
+            return
+        self._fetching = True
+        self._update_projects_subtitle()
+        self._load_git_info(refresh=True)
+
+    def _on_fetch_finished(self, unreachable: set[Path]) -> None:
+        self._fetching = False
+        self._unreachable = unreachable
+        # The sweep can land while the app is shutting down.
+        if self._level == "projects" and self.is_running:
+            self._build_project_rows(keep=self._current_path())
+        self._update_projects_subtitle()
+
+    def action_update(self) -> None:
+        """Fast-forward the highlighted project to its upstream."""
+        row = self._current_row()
+        if row is None:
+            return
+        if self._updating:
+            return
+        self._updating = True
+        self.notify(f"{row.project.name}: updating…", timeout=2)
+        self._run_update(row.project)
+
+    @work(thread=True, group="update", exclusive=True, exit_on_error=False)
+    def _run_update(self, project: Project) -> None:
+        """Fetch and fast-forward off the event loop.
+
+        ``git merge`` runs the repository's ``post-merge`` hook — arbitrary code
+        — so it must not happen with the UI frozen.
+        """
+        self.call_from_thread(self._on_update_finished, project, fast_forward(project.path))
+
+    def _on_update_finished(self, project: Project, result: UpdateResult) -> None:
+        self._updating = False
+        self.notify(
+            f"{project.name}: {result.message}",
+            severity="information" if result.ok else "warning",
+            timeout=8,
+        )
+        # The tasks travelled with the commits, so the list is stale too.
+        self._load_git_info()
+
+    def _current_path(self) -> Path | None:
+        row = self._current_row()
+        return row.project.path if row else None
+
     def _current_row(self) -> _Row | None:
         if self._level != "projects" or not self._rows:
             return None
@@ -247,6 +316,9 @@ class TaskViewerApp(App):
 
     def _show_projects(self) -> None:
         self._level = "projects"
+        # Set before the rows paint, so the subtitle shows it from the start.
+        first_look = not self._git_info
+        self._fetching = self._fetching or first_look
         self._current_project = None
         self._tasks_dir = None
         self.title = f"projects · {self._workspace_name}"
@@ -256,7 +328,7 @@ class TaskViewerApp(App):
         self.query_one(TaskListView).focus()
         # Shelling out to git for every project would freeze the UI, so rows go
         # up with whatever was known last and are repainted when the scan lands.
-        self._load_git_info()
+        self._load_git_info(refresh=first_look)
 
     def _last_project_path(self) -> Path | None:
         for project in self._projects:
@@ -328,13 +400,40 @@ class TaskViewerApp(App):
         summary = _plural(len(self._groups), "repo" if worktrees else "project")
         if worktrees:
             summary += f" · {_plural(worktrees, 'worktree')}"
+        if self._fetching:
+            summary += "  ⟳ fetching…"
         self.sub_title = f"{summary} · → to open"
 
-    @work(thread=True, group="git_info", exclusive=True)
-    def _load_git_info(self) -> None:
-        """Scan every project's git state off the event loop."""
-        scanned = {project.path: load_git_info(project.path) for project in self._projects}
-        self.call_from_thread(self._on_git_info, scanned)
+    @work(thread=True, group="git_info", exclusive=True, exit_on_error=False)
+    def _load_git_info(self, refresh: bool = False) -> None:
+        """Scan every project's git state off the event loop.
+
+        With ``refresh`` the remotes are contacted first, so the counts reflect
+        the remote as it is now rather than as of the last fetch. Rows are
+        painted from the local scan before that starts, so the network never
+        holds up the list.
+        """
+        self.call_from_thread(self._on_git_info, self._scan())
+        if not refresh:
+            return
+        # One fetch per repository: a worktree shares its repo's object store,
+        # so fetching each of them separately would just repeat the round trip.
+        repos = [group.project for group in self._groups]
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            reached = list(pool.map(fetch, [repo.path for repo in repos]))
+        # A failed fetch still bumps FETCH_HEAD's mtime, so without this the
+        # pane would report "checked just now" for a remote never contacted.
+        unreachable = {
+            project.path
+            for group, ok in zip(self._groups, reached)
+            if not ok
+            for project in (group.project, *group.worktrees)
+        }
+        self.call_from_thread(self._on_git_info, self._scan())
+        self.call_from_thread(self._on_fetch_finished, unreachable)
+
+    def _scan(self) -> dict[Path, GitInfo | None]:
+        return {project.path: load_git_info(project.path) for project in self._projects}
 
     def _on_git_info(self, scanned: dict[Path, GitInfo | None]) -> None:
         self._git_info = scanned
@@ -342,12 +441,10 @@ class TaskViewerApp(App):
         # the app is shutting down — in both cases there is nothing to repaint.
         if self._level != "projects" or not self.is_running:
             return
-        list_view = self.query_one(TaskListView)
-        for row, label in zip(self._rows, list_view.query(Label)):
-            label.update(self._row_label(row))
-        index = list_view.index
-        if index is not None and 0 <= index < len(self._rows):
-            self._show_project_summary(self._rows[index].project)
+        # Rebuild rather than zip labels: ListView.clear() prunes
+        # asynchronously, so a scan landing mid-prune would write into widgets
+        # that are about to vanish and leave the survivors showing stale counts.
+        self._build_project_rows(keep=self._current_path())
 
     # --- task actions ----------------------------------------------------
 
@@ -413,7 +510,7 @@ class TaskViewerApp(App):
 
     # --- grooming worker -------------------------------------------------
 
-    @work(thread=True, group="groom")
+    @work(thread=True, group="groom", exit_on_error=False)
     def _run_groom_worker(self) -> None:
         assert self._tasks_dir is not None
         name = self._current_project.name if self._current_project else "tasks"
@@ -562,7 +659,9 @@ class TaskViewerApp(App):
             f"**{counts['open']}** open · **{counts['ongoing']}** ongoing · "
             f"**{counts['closed']}** closed",
         ]
-        lines += _git_section(self._git_info.get(project.path))
+        lines += _git_section(
+            self._git_info.get(project.path), project.path in self._unreachable
+        )
         active = load_tasks(project.tasks_dir, _ACTIVE_STATES)
         if active:
             lines += ["", "## Active tasks", ""]
@@ -619,14 +718,21 @@ def _format_folded_note(worktrees: list[GitInfo | None]) -> str:
     known = [info for info in worktrees if info is not None]
     merged = [info for info in known if info.merged]
     dirty = sum(1 for info in known if info.dirty)
+    unpushed = sum(1 for info in known if info.unpushed or _never_pushed(info))
     parts = [f"[dim]{len(worktrees)} wt[/]"]
     if dirty:
         parts.append(f"[cyan]✎{dirty}[/]")
+    if unpushed:
+        parts.append(f"[yellow]↑{unpushed}[/]")
     if merged:
         risky = any(info.dirty for info in merged)
         style = "bold yellow" if risky else "green"
         parts.append(f"[{style}]✔{len(merged)}{'⚠' if risky else ''}[/]")
     return " ".join(parts)
+
+
+def _never_pushed(info: GitInfo) -> bool:
+    return info.has_remote and info.upstream is None and not info.merged
 
 
 def _format_worktree_row(project: Project, repo: Project, info: GitInfo | None) -> str:
@@ -661,22 +767,44 @@ def _format_git_line(info: GitInfo | None, width: int = _ROW_BRANCH_WIDTH) -> st
 def _format_state(info: GitInfo) -> str:
     """The drift, dirty and age markers — everything except the branch."""
     parts: list[str] = []
-    if info.merged:
-        # Nothing of its own left outside the base branch. For a worktree that
-        # is the whole story — it can go — so `behind` would only be noise. A
-        # main checkout in sync is the unremarkable case, so it says nothing.
-        if info.is_worktree:
-            parts.append("[green]✔merged[/]")
-    else:
-        if info.ahead:
-            parts.append(f"[green]↑{info.ahead}[/]")
-        if info.behind:
-            parts.append(f"[dim]↓{info.behind}[/]")
+    if info.merged and info.is_worktree:
+        # Nothing of its own left outside the base branch — it can go.
+        parts.append("[green]✔merged[/]")
+    # Remote state first: it is the most actionable, and a narrow pane clips
+    # from the right. Age goes last for the same reason.
+    parts += _remote_markers(info)
     if info.dirty:
         style = "bold yellow" if info.merged else "cyan"
         parts.append(f"[{style}]✎{info.dirty}[/]")
+    if not info.merged:
+        # Distance from the base branch, in ASCII so it cannot be confused with
+        # the remote arrows above — and so it renders in any terminal font.
+        if info.ahead:
+            parts.append(f"[green]+{info.ahead}[/]")
+        if info.behind:
+            parts.append(f"[dim]-{info.behind}[/]")
     parts.append(f"[dim]{describe_age(info.updated)}[/]")
     return " " + " ".join(parts)
+
+
+def _remote_markers(info: GitInfo) -> list[str]:
+    """``↑2`` to push, ``↓3`` to pull — where this sits against its remote.
+
+    Silent when there is nothing to act on. The arrows are U+2191/2193, which
+    terminal fonts actually carry; the doubled forms are in almost none.
+    """
+    if info.upstream is None:
+        # Never pushed, but only worth saying when there is somewhere to push.
+        return ["[yellow]new[/]"] if info.has_remote and not info.merged else []
+    if info.upstream_gone:
+        # Published, then deleted upstream: the work landed and was tidied up.
+        return ["[green]gone[/]"]
+    markers = []
+    if info.unpushed:
+        markers.append(f"[yellow]↑{info.unpushed}[/]")
+    if info.unpulled and info.tracks_own_branch:
+        markers.append(f"[bold cyan]↓{info.unpulled}[/]")
+    return markers
 
 
 def _shorten(text: str, width: int) -> str:
@@ -704,7 +832,7 @@ def _index_of(names: list[str], target: str | None) -> int:
     return 0
 
 
-def _git_section(info: GitInfo | None) -> list[str]:
+def _git_section(info: GitInfo | None, unreachable: bool = False) -> list[str]:
     """Markdown lines: when the checkout was made, last touched, and its drift."""
     if info is None:
         return []
@@ -722,8 +850,9 @@ def _git_section(info: GitInfo | None) -> list[str]:
         f"- **{'Created' if info.is_worktree else 'Branch since'}** "
         f"{format_moment(info.created)}",
         f"- **Updated** {format_moment(info.updated)}{_dirty_note(info)}",
-        f"- {_drift_note(info)}",
     ]
+    notes = (_drift_note(info), _remote_note(info, unreachable))
+    lines += [f"- {note}" for note in notes if note]
     if info.merged and info.is_worktree and info.dirty:
         lines += [
             "",
@@ -745,7 +874,10 @@ def _git_section(info: GitInfo | None) -> list[str]:
 def _drift_note(info: GitInfo) -> str:
     """How this checkout stands against its base, as a whole bullet line."""
     if info.base is None:
-        return "**Base** no `main`/`master` branch to compare against"
+        # Standing on the base branch itself: the Remote line has the story.
+        return "" if info.branch in ("main", "master") else (
+            "**Base** no `main`/`master` branch to compare against"
+        )
     if info.merged:
         # `ahead == 0` means the base already holds every commit here. For a
         # worktree that is the headline: the work landed, the directory can go.
@@ -756,6 +888,37 @@ def _drift_note(info: GitInfo) -> str:
     if info.behind:
         parts.append(f"{info.behind} behind")
     return " · ".join(parts)
+
+
+def _remote_note(info: GitInfo, unreachable: bool = False) -> str:
+    """Where this branch stands against its remote, and how fresh that is."""
+    if not info.has_remote:
+        return "**Remote** none configured"
+    checked = f" · checked {describe_age_phrase(info.fetched)}" if info.fetched else ""
+    if unreachable:
+        # A failed fetch still touches FETCH_HEAD, so its mtime would otherwise
+        # claim the remote was reached moments ago.
+        checked = " · **could not reach the remote** — counts may be stale"
+    if info.upstream is None:
+        return f"**Remote** never pushed — this branch exists only here{checked}"
+    if info.upstream_gone:
+        return (
+            f"**Remote** `{info.upstream}` has been deleted — "
+            f"the branch was published and then tidied up{checked}"
+        )
+    parts = [f"`{info.upstream}`"]
+    if info.unpushed:
+        parts.append(f"**{_plural(info.unpushed, 'commit')} to push**")
+    if info.unpulled and info.tracks_own_branch:
+        parts.append(f"**{_plural(info.unpulled, 'commit')} to pull** — press `u`")
+    if not info.tracks_own_branch:
+        parts.append(
+            f"**tracks another branch** — {_plural(info.unpulled, 'commit')} "
+            "behind it, but updating would move this branch onto it"
+        )
+    if info.in_step:
+        parts.append("up to date")
+    return f"**Remote** {' · '.join(parts)}{checked}"
 
 
 def _dirty_note(info: GitInfo) -> str:
