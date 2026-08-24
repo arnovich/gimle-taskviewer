@@ -309,17 +309,19 @@ def test_format_moment_of_nothing() -> None:
     assert format_moment(None) == "unknown"
 
 
-def test_base_falls_back_to_origin_main_while_on_main(repo: Path) -> None:
-    """The whole reason the candidate list has remote entries: unpushed work."""
+def test_the_base_is_local_only(repo: Path) -> None:
+    """`vs main` and `vs the remote` are different questions.
+
+    Folding a remote into the base branch made one pair of counts mean two
+    things depending on which branch you were standing on.
+    """
     _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-    _commit(repo, "one.py", "First unpushed commit")
-    _commit(repo, "two.py", "Second unpushed commit")
+    _commit(repo, "one.py", "A local commit")
 
     info = load_git_info(repo)
     assert info is not None
-    assert info.base == "origin/main"
-    assert info.ahead == 2
-    assert info.merged is False
+    assert info.base is None  # standing on main; nothing local to compare to
+    assert info.ahead == 0
 
 
 def test_a_vanished_dirty_path_is_ignored(repo: Path) -> None:
@@ -356,3 +358,99 @@ def test_describe_age_bucket_boundaries(delta: timedelta, expected: str) -> None
     """Choosing the bucket is the whole job, so pin both sides of each edge."""
     now = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
     assert describe_age(now - delta, now=now) == expected
+
+
+# --- where a branch stands against its remote -------------------------------
+
+
+def _track(repo: Path, remote_path: Path, branch: str = "main") -> None:
+    """Point ``branch`` at a remote of its own, without any network."""
+    _git(repo, "remote", "add", "origin", str(remote_path))
+    _git(repo, "update-ref", f"refs/remotes/origin/{branch}", "HEAD")
+    _git(repo, "config", f"branch.{branch}.remote", "origin")
+    _git(repo, "config", f"branch.{branch}.merge", f"refs/heads/{branch}")
+
+
+def test_a_repo_with_no_remote_says_so(repo: Path) -> None:
+    info = load_git_info(repo)
+    assert info is not None
+    assert info.has_remote is False
+    assert info.upstream is None
+
+
+def test_an_untracked_branch_with_a_remote_is_distinguished(repo: Path) -> None:
+    """"Never pushed" and "no remote at all" are different problems."""
+    _git(repo, "remote", "add", "origin", str(repo))
+
+    info = load_git_info(repo)
+    assert info is not None
+    assert info.has_remote is True
+    assert info.upstream is None
+
+
+def test_commits_not_yet_pushed_are_counted(repo: Path, tmp_path: Path) -> None:
+    _track(repo, tmp_path / "origin.git")
+    _commit(repo, "one.py", "First unpushed")
+    _commit(repo, "two.py", "Second unpushed")
+
+    info = load_git_info(repo)
+    assert info is not None
+    assert info.upstream == "origin/main"
+    assert info.unpushed == 2
+    assert info.unpulled == 0
+    assert info.in_step is False
+
+
+def test_commits_waiting_on_the_remote_are_counted(repo: Path, tmp_path: Path) -> None:
+    """This is the case that makes a task list silently stale."""
+    _commit(repo, "ahead-1.py", "Landed upstream")
+    _commit(repo, "ahead-2.py", "Also landed upstream")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(repo, "remote", "add", "origin", str(tmp_path / "origin.git"))
+    _git(repo, "config", "branch.main.remote", "origin")
+    _git(repo, "config", "branch.main.merge", "refs/heads/main")
+    _git(repo, "reset", "--hard", "HEAD~2")
+
+    info = load_git_info(repo)
+    assert info is not None
+    assert info.unpulled == 2
+    assert info.unpushed == 0
+    assert info.in_step is False
+
+
+def test_a_branch_level_with_its_upstream_is_in_step(repo: Path, tmp_path: Path) -> None:
+    _track(repo, tmp_path / "origin.git")
+
+    info = load_git_info(repo)
+    assert info is not None
+    assert info.in_step is True
+
+
+def test_a_deleted_upstream_is_reported(repo: Path, tmp_path: Path) -> None:
+    """What a merged-and-tidied feature branch looks like from here."""
+    _track(repo, tmp_path / "origin.git")
+    _git(repo, "update-ref", "-d", "refs/remotes/origin/main")
+
+    info = load_git_info(repo)
+    assert info is not None
+    assert info.upstream_gone is True
+
+
+def test_the_last_fetch_time_is_reported(repo: Path, tmp_path: Path) -> None:
+    """`in step` only ever means `as of this moment` — so it travels along."""
+    _track(repo, tmp_path / "origin.git")
+    (repo / ".git" / "FETCH_HEAD").write_text("", encoding="utf-8")
+
+    info = load_git_info(repo)
+    assert info is not None
+    assert info.fetched is not None
+
+
+def test_worktrees_share_their_repo_last_fetch(repo: Path) -> None:
+    (repo / ".git" / "FETCH_HEAD").write_text("", encoding="utf-8")
+    worktree = repo.parent / "gimle-example-feature"
+    _git(repo, "worktree", "add", "-b", "feat/thing", str(worktree))
+
+    info = load_git_info(worktree)
+    assert info is not None
+    assert info.fetched is not None

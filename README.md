@@ -110,11 +110,52 @@ branch is in the right-hand pane.
 
 * `✔merged` — the base branch already holds every commit here
 * `↑n` / `↓n` — commits ahead of / behind the base branch
+* `⇡n` / `⇣n` — commits not yet **pushed** / not yet **pulled**
+* `⇡new` — this branch has never been pushed; it exists only on this machine
 * `✎n` — uncommitted changes in the working tree
 * trailing `9m` / `3w` — how long ago the checkout was last touched
 
 A row says nothing about drift when there is nothing to say: a plain clone
 sitting in sync with its remote just shows its branch and age.
+
+## Keeping up with the remote
+
+`↑`/`↓` measure distance from `main`; `⇡`/`⇣` measure distance from the remote.
+They are different questions, so they get different arrows.
+
+When `tv` starts it fetches every repository in the background — one fetch per
+repo, since a worktree shares its repo's object store — so a `main` that moved
+while you were away shows up as `⇣3` without you having to ask. The list paints
+first and the counts arrive a second later; the network never blocks the UI.
+
+| Key | Action |
+| --- | ------ |
+| `f` | Fetch every repo again now |
+| `u` | Fast-forward the highlighted project to its upstream |
+
+`u` runs a fast-forward only. It will not create a merge commit and cannot
+leave you with conflicts — it either moves the branch pointer cleanly or
+declines and tells you why:
+
+```
+gimle-asgard: fast-forwarded 3 commits
+gimle-asgard: 5 uncommitted files — commit or stash first
+gimle-asgard: cannot fast-forward — diverged from origin/main
+```
+
+A dirty working tree is refused before anything runs, because a fast-forward
+can still overwrite an uncommitted file. When it does succeed the task list
+reloads, since the tasks arrived with the commits.
+
+The right pane always says when the remote was last contacted:
+
+```
+- **Remote** `origin/main` · **3 commits to pull** — press `u` · checked 2h ago
+```
+
+That "checked" is doing real work: `up to date` can only ever mean *as of the
+last fetch*. Neither `git` nor `tv` knows what the remote is doing right now
+without asking it.
 
 Press `→` (or `Enter`) to step into a project — a repo or one of its worktrees —
 and see its task list; press `←` to step back out. Everything else works the
@@ -181,6 +222,8 @@ one won't appear.
 | `j` / `k`  | Move down / up in the list                         |
 | `→` / `←`  | Enter a project / step back to the project list (workspace mode) |
 | `space`    | Fold or unfold a repo's worktrees (workspace mode)  |
+| `f`        | Fetch all repos from their remotes (workspace mode) |
+| `u`        | Fast-forward the highlighted project (workspace mode) |
 | `Tab`      | Switch focus between the two panes                 |
 | `c`        | **Work on the task with Claude Code** (see below)  |
 | `R`        | **Review all tasks** with Claude Code, in the background (see below) |
