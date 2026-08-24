@@ -1,10 +1,28 @@
-"""Shared fixtures: build a throwaway project tree with tasks/open|closed."""
+"""Shared fixtures: a throwaway project tree, and isolation for git tests."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
+
+# Committing must not depend on the developer's ~/.gitconfig — a global
+# `commit.gpgsign = true` alone would fail every repo built here.
+_GIT_ENV = {
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_AUTHOR_NAME": "tv test",
+    "GIT_AUTHOR_EMAIL": "tv@example.com",
+    "GIT_COMMITTER_NAME": "tv test",
+    "GIT_COMMITTER_EMAIL": "tv@example.com",
+}
+
+
+@pytest.fixture(autouse=True)
+def isolated_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every test's git repositories out of the developer's config."""
+    for name, value in _GIT_ENV.items():
+        monkeypatch.setenv(name, value)
 
 
 def _write(path: Path, text: str) -> None:
