@@ -101,7 +101,7 @@ def test_project_row_shows_branch_and_drift(worktree_workspace: Path) -> None:
 
 def test_a_project_without_git_gets_a_single_line_row(workspace: Path) -> None:
     project = find_projects(workspace)[0]
-    assert _format_project_row(project, None) == "gimle-asgard  [dim]2 active[/]"
+    assert _format_project_row(project, None) == "  gimle-asgard  [dim]2 active[/]"
 
 
 @pytest.mark.asyncio
@@ -114,21 +114,24 @@ async def test_the_subtitle_does_not_wait_for_the_git_scan(
     async with app.run_test():
         assert "2 repos" in app.sub_title
         assert "1 worktree" in app.sub_title
+        await app.workers.wait_for_complete()
 
 
 @pytest.mark.asyncio
-async def test_project_rows_are_repainted_after_the_scan(
+async def test_rows_gain_their_git_line_when_the_scan_lands(
     worktree_workspace: Path,
 ) -> None:
+    """No keypress: the row paints bare, then fills in on its own."""
     projects = find_projects(worktree_workspace)
     app = TaskViewerApp(projects, "gimle", workspace=True)
     async with app.run_test() as pilot:
+        before = [str(label.render()) for label in app.query(Label)]
+        assert not any("⎇" in text for text in before)
+
         await app.workers.wait_for_complete()
-        app.query_one(TaskListView).index = 0
-        await pilot.press("space")
         await pilot.pause()
-        labels = [str(label.render()) for label in app.query(Label)]
-        assert any("feat/thing" in text for text in labels)
+        after = [str(label.render()) for label in app.query(Label)]
+        assert any("⎇ main" in text for text in after)
 
 
 @pytest.mark.asyncio
@@ -224,7 +227,7 @@ async def test_worktrees_are_hidden_until_the_repo_is_expanded(
         await pilot.press("space")
         await pilot.pause()
         assert len(list_view) == 3
-        assert any("feat/thing" in str(label.render()) for label in app.query(Label))
+        assert any("feature" in str(label.render()) for label in app.query(Label))
 
         await pilot.press("space")
         await pilot.pause()
@@ -297,3 +300,140 @@ async def test_toggle_is_hidden_inside_a_project(worktree_workspace: Path) -> No
         await pilot.press("right")
         await pilot.pause()
         assert app.check_action("toggle_group", ()) is None
+
+
+# --- where the cursor lands -------------------------------------------------
+
+
+@pytest.fixture
+def trailing_worktree_workspace(worktree_workspace: Path) -> Path:
+    """A workspace where the repo with worktrees is NOT the first row.
+
+    With it first, "landed on the repo" and "reset to row 0" are the same
+    answer, and the tests below cannot tell a bug from correct behaviour.
+    """
+    _make_project(worktree_workspace, "aaa-plain", ["001-x"])
+    return worktree_workspace
+
+
+def _highlighted(app: TaskViewerApp) -> list[int]:
+    list_view = app.query_one(TaskListView)
+    return [i for i, node in enumerate(list_view._nodes) if node.highlighted]
+
+
+@pytest.mark.asyncio
+async def test_the_cursor_stays_visible_after_folding(
+    trailing_worktree_workspace: Path,
+) -> None:
+    """ListView.clear() prunes asynchronously; the highlight must survive it."""
+    projects = find_projects(trailing_worktree_workspace)
+    app = TaskViewerApp(projects, "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        app.query_one(TaskListView).index = 1  # gimle-asgard, which has a worktree
+        await pilot.press("space")
+        await pilot.pause()
+        assert _highlighted(app) == [1]
+
+
+@pytest.mark.asyncio
+async def test_folding_from_a_worktree_row_lands_on_its_repo(
+    trailing_worktree_workspace: Path,
+) -> None:
+    projects = find_projects(trailing_worktree_workspace)
+    app = TaskViewerApp(projects, "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        list_view = app.query_one(TaskListView)
+        list_view.index = 1
+        await pilot.press("space")
+        await pilot.pause()
+        list_view.index = 2  # the worktree
+        await pilot.press("space")
+        await pilot.pause()
+        assert list_view.index == 1
+        assert _highlighted(app) == [1]
+        assert app.query_one(Markdown).source.startswith("# gimle-asgard\n")
+
+
+@pytest.mark.asyncio
+async def test_back_from_a_project_reselects_it(
+    trailing_worktree_workspace: Path,
+) -> None:
+    projects = find_projects(trailing_worktree_workspace)
+    app = TaskViewerApp(projects, "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        app.query_one(TaskListView).index = 2  # gimle-mimir
+        await pilot.press("right")
+        await pilot.pause()
+        await pilot.press("left")
+        await pilot.pause()
+        assert app.query_one(TaskListView).index == 2
+        assert _highlighted(app) == [2]
+
+
+@pytest.mark.asyncio
+async def test_back_from_a_worktree_keeps_its_repo_unfolded(
+    trailing_worktree_workspace: Path,
+) -> None:
+    projects = find_projects(trailing_worktree_workspace)
+    app = TaskViewerApp(projects, "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        list_view = app.query_one(TaskListView)
+        list_view.index = 1
+        await pilot.press("space")
+        await pilot.pause()
+        list_view.index = 2
+        await pilot.press("right")
+        await pilot.pause()
+        await pilot.press("left")
+        await pilot.pause()
+        assert len(list_view) == 4  # still unfolded
+        assert list_view.index == 2
+        assert _highlighted(app) == [2]
+
+
+@pytest.mark.asyncio
+async def test_the_first_keypress_is_not_swallowed(worktree_workspace: Path) -> None:
+    """`→` must work immediately, before any refresh has settled."""
+    projects = find_projects(worktree_workspace)
+    app = TaskViewerApp(projects, "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await pilot.press("right")
+        await pilot.pause()
+        assert app._level == "tasks"
+        await app.workers.wait_for_complete()
+
+
+@pytest.mark.asyncio
+async def test_space_does_nothing_on_a_repo_without_worktrees(
+    trailing_worktree_workspace: Path,
+) -> None:
+    projects = find_projects(trailing_worktree_workspace)
+    app = TaskViewerApp(projects, "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        app.query_one(TaskListView).index = 0  # aaa-plain
+        await pilot.pause()
+        before = [str(label.render()) for label in app.query(Label)]
+        assert app.check_action("toggle_group", ()) is None  # not advertised
+        await pilot.press("space")
+        await pilot.pause()
+        assert [str(label.render()) for label in app.query(Label)] == before
+
+
+@pytest.mark.asyncio
+async def test_a_scan_landing_inside_a_project_leaves_the_task_list_alone(
+    worktree_workspace: Path,
+) -> None:
+    projects = find_projects(worktree_workspace)
+    app = TaskViewerApp(projects, "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await pilot.press("right")  # step in before the scan lands
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app._level == "tasks"
+        labels = [str(label.render()) for label in app.query(Label)]
+        assert not any("⎇" in text for text in labels)
