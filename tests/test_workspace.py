@@ -357,6 +357,7 @@ async def test_back_from_a_project_reselects_it(
         await pilot.press("right")
         await pilot.pause()
         await pilot.press("left")
+        await app.workers.wait_for_complete()
         await pilot.pause()
         assert app.query_one(TaskListView).index == 2
         assert _highlighted(app) == [2]
@@ -378,6 +379,9 @@ async def test_back_from_a_worktree_keeps_its_repo_unfolded(
         await pilot.press("right")
         await pilot.pause()
         await pilot.press("left")
+        # Stepping back out starts a fresh scan, which repaints the rows when it
+        # lands; assert on the settled list, not on it mid-rebuild.
+        await app.workers.wait_for_complete()
         await pilot.pause()
         assert len(list_view) == 4  # still unfolded
         assert list_view.index == 2
@@ -596,3 +600,20 @@ async def test_update_of_a_project_with_no_remote_changes_nothing(
         await pilot.press("u")
         await pilot.pause()
         assert [str(label.render()) for label in app.query(Label)] == before
+
+
+@pytest.mark.asyncio
+async def test_a_rebuild_with_an_unknown_row_keeps_the_cursor_put(
+    trailing_worktree_workspace: Path,
+) -> None:
+    """Falling back to row 0 would teleport the cursor on any background scan."""
+    projects = find_projects(trailing_worktree_workspace)
+    app = TaskViewerApp(projects, "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        app.query_one(TaskListView).index = 2
+        await pilot.pause()
+
+        app._build_project_rows(keep=Path("/nowhere/at/all"))
+        await pilot.pause()
+        assert app.query_one(TaskListView).index == 2

@@ -185,6 +185,9 @@ so `tv` tracks which remotes it actually reached rather than trusting that file.
 | `Tab`      | Switch focus between the two panes                 |
 | `c`        | **Work on the task with Claude Code** (see below)  |
 | `R`        | **Review all tasks** with Claude Code, in the background (see below) |
+| `n`        | Queue the task next (append to the work queue)      |
+| `p`        | Queue the task **first** (front of the queue)       |
+| `N`        | Take the task out of the queue                      |
 | `g`        | Mark the task ongoing                              |
 | `x`        | Mark the task done (move to `closed/`)             |
 | `u`        | Reopen the task (move back to `open/`)             |
@@ -206,6 +209,32 @@ number are padded to the same width, keeping every title in one column:
 ```
 
 A project whose tasks are all unnumbered gets no such column at all.
+
+## The work queue
+
+`priority` says how important a task is. **`next:` says what to do first** — it
+is a running order you set, and agents never write it. Queued tasks lead the
+list, in rank order, with the rank shown in cyan:
+
+```
+  ○ 053  1  Batched GPU simulation
+  ○ 051  2  Circuit completion via mutation MCTS
+  ○ 050     Differentiable finetuning (replace REINFORCE)
+  ○ 061     Investigate model architecture
+```
+
+`n` appends the selected task to the queue, `p` puts it at the front, `N` takes
+it out. Ranks are stored as `next: <integer>` in the task's frontmatter, so the
+queue travels with the repo and any agent can read it.
+
+Gaps are fine — finishing task `1` leaves `2` and `3` where they are, and a
+closed task's rank stops counting. Promoting takes the slot below the current
+leader where there is one, so it usually rewrites a single file rather than
+renumbering the queue.
+
+Agents pick tasks up with the `grind` skill, which claims a task on `main`
+before starting so two agents never take the same one. See
+`gimle-skills/references/task-format.md` for the full task standard.
 
 ## Working on a task with Claude Code
 

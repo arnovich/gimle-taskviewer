@@ -136,3 +136,74 @@ async def test_project_summary_lists_task_numbers(tmp_path: Path) -> None:
         source = app.query_one(Markdown).source
         assert "`052`" in source
         assert "2D heat equation" in source
+
+
+@pytest.mark.asyncio
+async def test_queue_keys_set_and_clear_the_rank(project: Path) -> None:
+    tasks_dir = project / "tasks"
+    app = TaskViewerApp.single(tasks_dir, "gimle-example")
+    async with app.run_test() as pilot:
+        list_view = app.query_one(TaskListView)
+        list_view.index = 1
+        await pilot.pause()
+        chosen = app._tasks[1].task_id
+
+        await pilot.press("n")  # enqueue
+        await pilot.pause()
+        queued = {t.task_id: t.next_rank for t in app._tasks}
+        assert queued[chosen] == 1
+        # A queued task leads the list, whatever its number.
+        assert app._tasks[0].task_id == chosen
+
+        await pilot.press("N")  # clear
+        await pilot.pause()
+        assert all(t.next_rank is None for t in app._tasks)
+
+
+@pytest.mark.asyncio
+async def test_queued_tasks_lead_the_list_in_rank_order(project: Path) -> None:
+    app = TaskViewerApp.single(project / "tasks", "gimle-example")
+    async with app.run_test() as pilot:
+        list_view = app.query_one(TaskListView)
+
+        async def select(task_id: str) -> None:
+            list_view.index = next(
+                i for i, t in enumerate(app._tasks) if t.task_id == task_id
+            )
+            await pilot.pause()
+
+        await select("010-dir-task")
+        await pilot.press("n")  # queued first, so rank 1
+        await pilot.pause()
+        await select("052-heat-equation")
+        await pilot.press("p")  # promoted ahead of it
+        await pilot.pause()
+
+        assert [t.task_id for t in app._tasks[:2]] == [
+            "052-heat-equation",
+            "010-dir-task",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_task_without_frontmatter_cannot_be_queued(project: Path) -> None:
+    """It has nowhere to put the field; say so rather than failing silently."""
+    app = TaskViewerApp.single(project / "tasks", "gimle-example")
+    async with app.run_test() as pilot:
+        list_view = app.query_one(TaskListView)
+        list_view.index = next(
+            i for i, t in enumerate(app._tasks) if t.task_id == "003-no-frontmatter"
+        )
+        await pilot.pause()
+        await pilot.press("n")
+        await pilot.pause()
+        assert list(app._notifications)[-1].severity == "error"
+        assert all(t.next_rank is None for t in app._tasks)
+
+
+def test_the_row_shows_the_queue_rank() -> None:
+    task = _task("053-batched", "Batched GPU simulation")
+    task.next_rank = 2
+    row = _format_row(task, 3)
+    assert "2" in row
+    assert "Batched GPU simulation" in row

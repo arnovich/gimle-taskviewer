@@ -37,9 +37,19 @@ each task's state:
 - `{folder_name}/closed/`   — done or abandoned
 
 Each task is a markdown file (a few are directories of fragments such as \
-description.md / spec.md / plan.md). Files may carry YAML frontmatter with: \
-title, state, labels, priority (high | medium | low). The FOLDER is the source \
-of truth for state.
+description.md / spec.md / plan.md). The FOLDER is the source of truth for \
+state.
+
+The task file standard is `gimle-skills/references/task-format.md` — read it \
+first if you can reach it. In short: required frontmatter is title, state \
+(lowercase), priority (high | medium | low) and labels; the body needs a \
+`## Context` and a checkable `## Outcome`; filenames are NNN-kebab-slug.md and \
+the number never changes.
+
+`next:` is the owner's work queue and is OFF LIMITS. Never add, change or \
+remove it — not even on a task you are closing. Same for claim fields \
+(claimed_by, claimed_at, branch) on tasks that are currently ongoing: leave \
+them alone, another agent is working that task.
 
 Do the following:
 1. Read every task in all three subfolders.
@@ -52,7 +62,10 @@ match. A task whose body shows the work is finished belongs in `closed/`.
 from its content, blockers and dependencies; add it if missing, correct it if \
 clearly wrong, and leave already-reasonable priorities alone.
 5. Normalise broken metadata: ensure every file has a `title:` (derive it from \
-the first heading if missing) and tidy malformed frontmatter.
+the first heading if missing) and tidy malformed frontmatter. Fold one-off \
+fields onto the standard spellings (`blocked_by` -> `depends_on`, `opened` -> \
+`created`); drop fields the standard does not define, moving anything worth \
+keeping into the body.
 6. Clean up: merge duplicate tasks (keep the richer one, fold in anything \
 unique, move the redundant one to `closed/` with a one-line note); move stale \
 or superseded tasks to `closed/` with a short reason. Prefer moving to \
@@ -60,6 +73,7 @@ or superseded tasks to `closed/` with a short reason. Prefer moving to \
 
 Constraints:
 - Do NOT invent new tasks or change the substance of a task's requirements.
+- Do NOT touch `next:` or the claim fields on ongoing tasks.
 - Preserve the author's wording and formatting — edit frontmatter and filing, \
 not intent.
 - Keep filenames stable (including any numeric prefix) unless you are merging.
