@@ -40,6 +40,8 @@ class Task:
     body: str
     labels: list[str] = field(default_factory=list)
     priority: str | None = None
+    # The owner's work-queue rank. Never written by an agent.
+    next_rank: int | None = None
 
     @property
     def number(self) -> str | None:
@@ -108,7 +110,14 @@ def load_tasks(tasks_dir: Path, states: tuple[str, ...] = STATES) -> list[Task]:
             task = _load_entry(entry, state)
             if task is not None:
                 tasks.append(task)
-    tasks.sort(key=lambda t: (t.sort_key, STATES.index(t.state)))
+    tasks.sort(
+        key=lambda t: (
+            t.next_rank is None,
+            t.next_rank or 0,
+            t.sort_key,
+            STATES.index(t.state),
+        )
+    )
     return tasks
 
 
@@ -125,7 +134,7 @@ def _load_entry(entry: Path, state: str) -> Task | None:
 
 def _load_dir_entry(entry: Path, state: str) -> Task | None:
     """Concatenate a directory task's markdown fragments into one body."""
-    fragments = _ordered_fragments(entry)
+    fragments = ordered_fragments(entry)
     if not fragments:
         return None
     meta: dict = {}
@@ -140,7 +149,7 @@ def _load_dir_entry(entry: Path, state: str) -> Task | None:
     return _build_task(entry.name, state, entry, "\n\n---\n\n".join(sections), meta)
 
 
-def _ordered_fragments(entry: Path) -> list[Path]:
+def ordered_fragments(entry: Path) -> list[Path]:
     """Known fragments first in a stable order, then any other ``*.md`` files."""
     known = [entry / name for name in _FRAGMENT_ORDER if (entry / name).is_file()]
     extras = sorted(
@@ -164,7 +173,15 @@ def _build_task(
         body=body.strip(),
         labels=[str(label) for label in labels],
         priority=str(priority) if priority is not None else None,
+        next_rank=_as_rank(meta.get("next")),
     )
+
+
+def _as_rank(value: object) -> int | None:
+    """A queue rank is a positive integer; anything else is not a rank."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
 
 
 def _derive_title(meta: dict, body: str, fallback: str) -> str:
