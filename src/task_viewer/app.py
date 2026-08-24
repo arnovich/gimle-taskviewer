@@ -522,11 +522,12 @@ class TaskViewerApp(App):
             return
         try:
             if operation is None:
-                clear_next(task)
+                clear_next(task, self._tasks_dir)
                 detail = ""
             else:
                 detail = f" as #{operation(task, self._tasks_dir)}"
-        except QueueError as error:
+        except (QueueError, OSError) as error:
+            # A read-only or vanished task file must not take the app down.
             self.notify(str(error), severity="error", timeout=6)
             return
         self.notify(f"{task.task_id} {verb}{detail}")

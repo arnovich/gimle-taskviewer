@@ -134,7 +134,7 @@ def _load_entry(entry: Path, state: str) -> Task | None:
 
 def _load_dir_entry(entry: Path, state: str) -> Task | None:
     """Concatenate a directory task's markdown fragments into one body."""
-    fragments = _ordered_fragments(entry)
+    fragments = ordered_fragments(entry)
     if not fragments:
         return None
     meta: dict = {}
@@ -149,7 +149,7 @@ def _load_dir_entry(entry: Path, state: str) -> Task | None:
     return _build_task(entry.name, state, entry, "\n\n---\n\n".join(sections), meta)
 
 
-def _ordered_fragments(entry: Path) -> list[Path]:
+def ordered_fragments(entry: Path) -> list[Path]:
     """Known fragments first in a stable order, then any other ``*.md`` files."""
     known = [entry / name for name in _FRAGMENT_ORDER if (entry / name).is_file()]
     extras = sorted(

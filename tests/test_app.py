@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -207,3 +208,46 @@ def test_the_row_shows_the_queue_rank() -> None:
     row = _format_row(task, 3)
     assert "2" in row
     assert "Batched GPU simulation" in row
+
+
+@pytest.mark.asyncio
+async def test_queueing_a_vanished_task_does_not_crash(project: Path) -> None:
+    """The groom pass moves task files while tv is open."""
+    tasks_dir = project / "tasks"
+    app = TaskViewerApp.single(tasks_dir, "gimle-example")
+    async with app.run_test() as pilot:
+        list_view = app.query_one(TaskListView)
+        list_view.index = next(
+            i for i, t in enumerate(app._tasks) if t.task_id == "052-heat-equation"
+        )
+        await pilot.pause()
+        app._tasks[list_view.index].path.unlink()  # someone else moved it
+
+        await pilot.press("n")
+        await pilot.pause()
+        assert app.is_running  # an OSError must not take the TUI down
+        assert list(app._notifications)[-1].severity == "error"
+
+
+@pytest.mark.asyncio
+async def test_queueing_an_unreadable_task_does_not_crash(project: Path) -> None:
+    """os.access checks writability; an unreadable file still raises OSError."""
+    if os.geteuid() == 0:
+        pytest.skip("root ignores file permissions")
+    tasks_dir = project / "tasks"
+    app = TaskViewerApp.single(tasks_dir, "gimle-example")
+    async with app.run_test() as pilot:
+        list_view = app.query_one(TaskListView)
+        list_view.index = next(
+            i for i, t in enumerate(app._tasks) if t.task_id == "052-heat-equation"
+        )
+        await pilot.pause()
+        target = app._tasks[list_view.index].path
+        target.chmod(0o000)
+        try:
+            await pilot.press("n")
+            await pilot.pause()
+            assert app.is_running
+            assert list(app._notifications)[-1].severity == "error"
+        finally:
+            target.chmod(0o644)
