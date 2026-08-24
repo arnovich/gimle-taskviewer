@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from task_viewer.app import TaskListView, TaskViewerApp
+from task_viewer.app import (
+    TaskListView,
+    TaskViewerApp,
+    _format_project_row,
+    _git_section,
+)
+from task_viewer.git_info import load_git_info
 from task_viewer.workspace import find_projects
 
 
@@ -68,3 +75,73 @@ async def test_task_keys_hidden_while_browsing_projects(workspace: Path) -> None
         await pilot.pause()
         assert app.check_action("groom", ()) is True
         assert app.check_action("back", ()) is True
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True
+    )
+
+
+@pytest.fixture
+def worktree_workspace(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A workspace where one project is a worktree of another, one commit ahead."""
+    for name, value in (
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_SYSTEM", "/dev/null"),
+        ("GIT_AUTHOR_NAME", "tv test"),
+        ("GIT_AUTHOR_EMAIL", "tv@example.com"),
+        ("GIT_COMMITTER_NAME", "tv test"),
+        ("GIT_COMMITTER_EMAIL", "tv@example.com"),
+    ):
+        monkeypatch.setenv(name, value)
+
+    repo = workspace / "gimle-asgard"
+    _git(repo, "init", "-b", "main")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "Initial commit")
+
+    worktree = workspace / "gimle-asgard-feature"
+    _git(repo, "worktree", "add", "-b", "feat/thing", str(worktree))
+    (worktree / "tasks" / "open" / "003-new.md").write_text("# New task\n")
+    _git(worktree, "add", "-A")
+    _git(worktree, "commit", "-m", "Add the feature")
+    return workspace
+
+
+def test_project_row_shows_branch_drift_and_age(worktree_workspace: Path) -> None:
+    project = next(
+        p for p in find_projects(worktree_workspace) if p.name.endswith("-feature")
+    )
+    row = _format_project_row(project, load_git_info(project.path))
+    branch_line = row.splitlines()[1]
+    assert "feat/thing" in branch_line
+    assert "↑1" in branch_line
+
+
+def test_summary_section_answers_created_updated_and_drift(
+    worktree_workspace: Path,
+) -> None:
+    worktree = worktree_workspace / "gimle-asgard-feature"
+    section = "\n".join(_git_section(load_git_info(worktree)))
+    assert "## Worktree" in section
+    assert "worktree of `gimle-asgard`" in section
+    assert "**Created**" in section
+    assert "**Updated**" in section
+    assert "1 ahead" in section
+    assert "- Add the feature" in section
+
+
+def test_no_git_section_for_a_plain_project(workspace: Path) -> None:
+    project = find_projects(workspace)[0]
+    assert _git_section(load_git_info(project.path)) == []
+    assert "\n" not in _format_project_row(project, None)
+
+
+@pytest.mark.asyncio
+async def test_workspace_subtitle_counts_worktrees(worktree_workspace: Path) -> None:
+    projects = find_projects(worktree_workspace)
+    app = TaskViewerApp(projects, "gimle", workspace=True)
+    async with app.run_test():
+        assert "1 worktree" in app.sub_title
+        assert app._git_info[worktree_workspace / "gimle-asgard-feature"] is not None
