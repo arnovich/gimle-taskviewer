@@ -96,25 +96,12 @@ def test_project_row_shows_branch_and_drift(worktree_workspace: Path) -> None:
     row = _format_project_row(project, load_git_info(project.path))
     branch_line = row.splitlines()[1]
     assert "feat/thing" in branch_line
-    assert "↑1" in branch_line
+    assert "+1" in branch_line
 
 
 def test_a_project_without_git_gets_a_single_line_row(workspace: Path) -> None:
     project = find_projects(workspace)[0]
     assert _format_project_row(project, None) == "  gimle-asgard  [dim]2 active[/]"
-
-
-@pytest.mark.asyncio
-async def test_the_subtitle_does_not_wait_for_the_git_scan(
-    worktree_workspace: Path,
-) -> None:
-    """Grouping reads `.git` pointer files, so the counts are known at once."""
-    projects = find_projects(worktree_workspace)
-    app = TaskViewerApp(projects, "gimle", workspace=True)
-    async with app.run_test():
-        assert "2 repos" in app.sub_title
-        assert "1 worktree" in app.sub_title
-        await app.workers.wait_for_complete()
 
 
 @pytest.mark.asyncio
@@ -284,12 +271,14 @@ async def test_toggling_a_worktree_row_folds_its_repo(
 
 @pytest.mark.asyncio
 async def test_subtitle_counts_repos_and_worktrees(worktree_workspace: Path) -> None:
+    """Grouping reads `.git` pointer files, so the counts need no git command."""
     app = TaskViewerApp(find_projects(worktree_workspace), "gimle", workspace=True)
     async with app.run_test() as pilot:
+        assert "2 repos" in app.sub_title
+        assert "1 worktree" in app.sub_title
         await app.workers.wait_for_complete()
         await pilot.pause()
         assert "2 repos" in app.sub_title
-        assert "1 worktree" in app.sub_title
 
 
 @pytest.mark.asyncio
@@ -442,38 +431,143 @@ async def test_a_scan_landing_inside_a_project_leaves_the_task_list_alone(
 # --- keeping up with the remote ---------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_update_fast_forwards_the_highlighted_project(
-    worktree_workspace: Path, tmp_path: Path
-) -> None:
-    """Pressing `u` brings in the commits — and the tasks that rode with them."""
-    repo = worktree_workspace / "gimle-asgard"
+@pytest.fixture
+def tracking_workspace(tmp_path: Path) -> Path:
+    """A workspace with one project whose origin has a task it has not seen."""
     origin = tmp_path / "origin"
-    _git(repo, "clone", "--quiet", "--bare", str(repo), str(origin))
-    _git(repo, "remote", "add", "origin", str(origin))
-    _git(repo, "fetch", "--quiet", "origin")
-    _git(repo, "branch", "--set-upstream-to=origin/main", "main")
+    (origin / "tasks" / "open").mkdir(parents=True)
+    (origin / "tasks" / "open" / "001-a.md").write_text("# A\n")
+    _git(origin, "init", "-b", "main")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-m", "Initial commit")
 
-    # A task lands on the remote that this checkout has never seen.
-    scratch = tmp_path / "scratch"
-    _git(tmp_path, "clone", "--quiet", str(origin), str(scratch))
-    (scratch / "tasks" / "open" / "099-new-task.md").write_text("# Newly filed\n")
-    _git(scratch, "add", "-A")
-    _git(scratch, "commit", "-m", "File a new task")
-    _git(scratch, "push", "--quiet", "origin", "main")
-    _git(repo, "fetch", "--quiet", "origin")
+    workspace = tmp_path / "gimle"
+    workspace.mkdir()
+    _git(workspace, "clone", "--quiet", str(origin), str(workspace / "proj"))
 
+    (origin / "tasks" / "open" / "099-new-task.md").write_text("# Newly filed\n")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-m", "File a new task")
+    return workspace
+
+
+@pytest.mark.asyncio
+async def test_launching_notices_the_remote_has_moved(
+    tracking_workspace: Path,
+) -> None:
+    """No keypress: the startup fetch is what makes a stale task list visible."""
+    app = TaskViewerApp(find_projects(tracking_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        rows = [str(label.render()) for label in app.query(Label)]
+        assert any("↓1" in row for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_f_picks_up_a_commit_that_landed_after_launch(
+    tracking_workspace: Path, tmp_path: Path
+) -> None:
+    app = TaskViewerApp(find_projects(tracking_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        (tmp_path / "origin" / "tasks" / "open" / "100-later.md").write_text("# Later\n")
+        _git(tmp_path / "origin", "add", "-A")
+        _git(tmp_path / "origin", "commit", "-m", "File another")
+
+        await pilot.press("f")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        rows = [str(label.render()) for label in app.query(Label)]
+        assert any("↓2" in row for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_update_brings_in_the_tasks_and_repaints_the_row(
+    tracking_workspace: Path,
+) -> None:
+    """The commit's headline claim: the task list is stale too, so it reloads."""
+    repo = tracking_workspace / "proj"
+    app = TaskViewerApp(find_projects(tracking_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert any("1 active" in str(l.render()) for l in app.query(Label))
+
+        await pilot.press("u")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert (repo / "tasks" / "open" / "099-new-task.md").exists()
+        rows = [str(label.render()) for label in app.query(Label)]
+        assert any("2 active" in row for row in rows)
+        assert not any("↓" in row for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_a_worktree_is_not_fetched_separately_from_its_repo(
+    worktree_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """They share one object store; fetching both just repeats the round trip."""
+    asked: list[Path] = []
+    monkeypatch.setattr(
+        "task_viewer.app.fetch", lambda path: asked.append(path) or True
+    )
     app = TaskViewerApp(find_projects(worktree_workspace), "gimle", workspace=True)
     async with app.run_test() as pilot:
         await app.workers.wait_for_complete()
-        app.query_one(TaskListView).index = 0
         await pilot.pause()
-        assert not (repo / "tasks" / "open" / "099-new-task.md").exists()
+    assert asked == [
+        worktree_workspace / "gimle-asgard",
+        worktree_workspace / "gimle-mimir",
+    ]
 
-        await pilot.press("u")
-        await pilot.pause()
-        assert (repo / "tasks" / "open" / "099-new-task.md").exists()
+
+@pytest.mark.asyncio
+async def test_the_subtitle_says_it_is_fetching_from_the_start(
+    tracking_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The startup fetch is the one path the indicator exists for."""
+    monkeypatch.setattr("task_viewer.app.fetch", lambda path: True)
+    app = TaskViewerApp(find_projects(tracking_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        assert "fetching" in app.sub_title
         await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "fetching" not in app.sub_title
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_remote_is_admitted_to(
+    tracking_workspace: Path, tmp_path: Path
+) -> None:
+    """A failed fetch still bumps FETCH_HEAD, so silence would read as freshness."""
+    (tmp_path / "origin").rename(tmp_path / "origin-gone")
+    app = TaskViewerApp(find_projects(tracking_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        source = app.query_one(Markdown).source
+        assert "could not reach the remote" in source
+        assert "checked just now" not in source
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_notification_is_a_warning_that_names_the_project(
+    tracking_workspace: Path,
+) -> None:
+    (tracking_workspace / "proj" / "scratch.txt").write_text("wip\n")
+    app = TaskViewerApp(find_projects(tracking_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.press("u")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        last = list(app._notifications)[-1]
+        assert last.severity == "warning"
+        assert last.message.startswith("proj: ")
+        assert "uncommitted" in last.message
 
 
 @pytest.mark.asyncio

@@ -60,8 +60,8 @@ def _info(**overrides: object) -> GitInfo:
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
-        ({"ahead": 3}, "↑3"),
-        ({"ahead": 1, "behind": 7}, "↓7"),
+        ({"ahead": 3}, "+3"),
+        ({"ahead": 1, "behind": 7}, "-7"),
         ({"dirty": 4}, "✎4"),
         ({"ahead": 0, "behind": 7, "subjects": []}, "✔merged"),
         # A plain clone in sync with its remote still shows branch and age.
@@ -223,7 +223,7 @@ def test_a_worktree_outside_its_repo_naming_keeps_its_whole_name() -> None:
 
 def test_a_worktree_row_still_shows_its_state() -> None:
     row = _format_worktree_row(_project("gimle-mimir-166"), _REPO, _info(dirty=7))
-    assert "↑1" in row and "✎7" in row
+    assert "+1" in row and "✎7" in row
 
 
 def test_a_worktree_row_before_the_scan_shows_only_its_name() -> None:
@@ -290,15 +290,16 @@ def test_a_repo_row_keeps_its_name_column_without_a_marker() -> None:
 
 
 def _remote(**kw) -> GitInfo:
+    kw.setdefault("tracks_own_branch", True)
     return _info(upstream="origin/feat/thing", has_remote=True, **kw)
 
 
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
-        ({"unpushed": 2}, "⇡2"),
-        ({"unpulled": 3}, "⇣3"),
-        ({"unpushed": 1, "unpulled": 4}, "⇣4"),
+        ({"unpushed": 2}, "↑2"),
+        ({"unpulled": 3}, "↓3"),
+        ({"unpushed": 1, "unpulled": 4}, "↓4"),
     ],
 )
 def test_remote_markers_appear_on_the_row(overrides: dict, expected: str) -> None:
@@ -307,23 +308,23 @@ def test_remote_markers_appear_on_the_row(overrides: dict, expected: str) -> Non
 
 def test_a_branch_in_step_with_its_remote_is_quiet() -> None:
     line = _format_git_line(_remote())
-    assert "⇡" not in line and "⇣" not in line
+    assert "↑" not in line and "↓" not in line
 
 
 def test_an_unpushed_branch_is_flagged_when_a_remote_exists() -> None:
     """Work that exists only on this machine is worth knowing about."""
-    assert "⇡new" in _format_git_line(_info(has_remote=True))
+    assert "new" in _format_git_line(_info(has_remote=True))
 
 
 def test_no_remote_means_no_marker() -> None:
     line = _format_git_line(_info(has_remote=False))
-    assert "⇡" not in line and "⇣" not in line
+    assert "↑" not in line and "↓" not in line and "new" not in line
 
 
 def test_a_merged_worktree_is_not_nagged_about_pushing() -> None:
     """Its commits are already on the base branch; pushing it is pointless."""
     line = _format_git_line(_info(ahead=0, subjects=[], has_remote=True))
-    assert "⇡new" not in line
+    assert "new" not in line
 
 
 def test_the_remote_note_names_what_is_waiting() -> None:
