@@ -8,6 +8,7 @@ decides how to word it.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -60,6 +61,7 @@ class GitInfo:
     unpushed: int = 0
     unpulled: int = 0
     upstream_gone: bool = False
+    tracks_own_branch: bool = False
     has_remote: bool = False
     fetched: datetime | None = None
 
@@ -70,7 +72,11 @@ class GitInfo:
         Never means "matches the remote right now" — only a fetch can know
         that, which is why :attr:`fetched` travels alongside.
         """
-        return self.upstream is not None and not (self.unpushed or self.unpulled)
+        return (
+            self.upstream is not None
+            and not self.upstream_gone
+            and not (self.unpushed or self.unpulled)
+        )
 
     @property
     def kind(self) -> str:
@@ -95,11 +101,16 @@ def load_git_info(root: Path) -> GitInfo | None:
     if branch is None:
         return None
 
-    git_dir = _git(root, "rev-parse", "--absolute-git-dir") or ""
-    # A linked worktree's git dir lives under `<repo>/.git/worktrees/<name>`. A
-    # submodule also has a `.git` *file*, so the path — not the file type — is
-    # what tells the two apart.
-    is_worktree = "/worktrees/" in git_dir
+    # Two lines: this checkout's git dir, and the one it shares with its repo.
+    # They differ only for a linked worktree — which is what a submodule is not,
+    # despite also having a `.git` file. Asking git beats matching on path text,
+    # which misreads any repo that simply lives under a directory named
+    # `worktrees`.
+    dirs = (_git(root, "rev-parse", "--path-format=absolute", "--git-dir",
+                 "--git-common-dir") or "").splitlines()
+    git_dir = dirs[0] if dirs else ""
+    common_dir = dirs[1] if len(dirs) > 1 else git_dir
+    is_worktree = bool(git_dir) and git_dir != common_dir
     detached = branch == "HEAD"
     dirty_paths = _dirty_paths(root)
     base, base_ref = _pick_base(root, branch)
@@ -110,34 +121,43 @@ def load_git_info(root: Path) -> GitInfo | None:
         created=_created(root, None if detached else branch, is_worktree),
         updated=_updated(root, dirty_paths),
         base=base,
-        repo=_repo_name(git_dir) if is_worktree else None,
+        repo=_repo_name(common_dir) if is_worktree else None,
         ahead=ahead,
         behind=behind,
         subjects=_subjects(root, base_ref) if base_ref and ahead else [],
         dirty=len(dirty_paths),
-        **_remote_state(root, None if detached else branch, git_dir),
+        **_remote_state(root, None if detached else branch, git_dir, common_dir),
     )
 
 
-def _remote_state(root: Path, branch: str | None, git_dir: str) -> dict:
+def _remote_state(
+    root: Path, branch: str | None, git_dir: str, common_dir: str
+) -> dict:
     """Where this branch stands against its upstream, as last fetched."""
     tracking = _upstream(root, branch) if branch else None
     if tracking is None:
         # No upstream: worth saying so only if there is a remote to push to.
-        return {"has_remote": bool(_git(root, "remote")), "fetched": _last_fetch(git_dir)}
-    name, unpulled, unpushed, gone = tracking
+        return {
+            "has_remote": bool(_git(root, "remote")),
+            "fetched": _last_fetch(git_dir, common_dir),
+        }
+    name, unpulled, unpushed, gone, remote_branch = tracking
     return {
         "upstream": name,
         "unpushed": unpushed,
         "unpulled": unpulled,
         "upstream_gone": gone,
+        # `git worktree add -b` inherits the upstream of the branch it was cut
+        # from, so a task branch often tracks origin/main. Pulling that would
+        # move the branch onto main and lose what it was for.
+        "tracks_own_branch": remote_branch == branch,
         "has_remote": True,
-        "fetched": _last_fetch(git_dir),
+        "fetched": _last_fetch(git_dir, common_dir),
     }
 
 
-def _upstream(root: Path, branch: str) -> tuple[str, int, int, bool] | None:
-    """``(name, unpulled, unpushed, gone)`` for the branch's upstream.
+def _upstream(root: Path, branch: str) -> tuple[str, int, int, bool, str] | None:
+    """``(name, unpulled, unpushed, gone, remote_branch)`` for the upstream.
 
     One ``for-each-ref`` carries both the name and the counts: ``%(upstream:track)``
     renders as ``[ahead 2, behind 1]``, or ``[gone]`` when the remote branch has
@@ -146,34 +166,41 @@ def _upstream(root: Path, branch: str) -> tuple[str, int, int, bool] | None:
     out = _git(
         root,
         "for-each-ref",
-        "--format=%(upstream:short)%09%(upstream:track)",
+        "--format=%(upstream:short)%09%(upstream:track)%09%(upstream:remotename)",
         f"refs/heads/{branch}",
     )
     if not out:
         return None
-    name, _, track = out.partition("\t")
+    name, _, rest = out.partition("\t")
+    track, _, remote = rest.partition("\t")
     if not name:
         return None
     ahead = _AHEAD_RE.search(track)
     behind = _BEHIND_RE.search(track)
+    # `origin` + `/` stripped off `origin/feat/x` leaves the branch as the
+    # remote knows it; comparing whole names avoids guessing where to split.
+    remote_branch = name[len(remote) + 1:] if remote and name.startswith(remote) else name
     return (
         name,
         int(behind.group(1)) if behind else 0,
         int(ahead.group(1)) if ahead else 0,
         track.strip() == "[gone]",
+        remote_branch,
     )
 
 
-def _last_fetch(git_dir: str) -> datetime | None:
-    """When this repository last heard from its remote.
+def _last_fetch(git_dir: str, common_dir: str) -> datetime | None:
+    """When this checkout last heard from its remote.
 
-    ``FETCH_HEAD`` lives in the common git dir, so every worktree of a repo
-    reports the same — correct, since they share one object store.
+    ``FETCH_HEAD`` is written per worktree, so a fetch run inside one is
+    invisible from its repo and vice versa. The newer of the two is what any
+    of them last heard.
     """
-    if not git_dir:
-        return None
-    common = git_dir.partition("/worktrees/")[0]
-    return _mtime(Path(common) / "FETCH_HEAD")
+    stamps = [
+        _mtime(Path(where) / "FETCH_HEAD") for where in (git_dir, common_dir) if where
+    ]
+    known = [stamp for stamp in stamps if stamp is not None]
+    return max(known) if known else None
 
 
 def _created(root: Path, branch: str | None, is_worktree: bool) -> datetime | None:
@@ -227,9 +254,8 @@ def _detached_name(root: Path) -> str:
 def _pick_base(root: Path, branch: str) -> tuple[str | None, str | None]:
     """First base branch that exists and isn't the one we're standing on.
 
-    Returns ``(display name, ref)``. On ``main`` itself the local branch says
-    nothing, so the comparison falls through to ``origin/main`` and shows
-    unpushed work instead.
+    Returns ``(display name, ref)``, or ``(None, None)`` when standing on the
+    base branch itself — there the remote fields carry the story instead.
     """
     out = _git(
         root, "for-each-ref", "--format=%(refname)", *(r for _, r in _BASE_CANDIDATES)
@@ -241,9 +267,9 @@ def _pick_base(root: Path, branch: str) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _repo_name(git_dir: str) -> str | None:
+def _repo_name(common_dir: str) -> str | None:
     """Directory name of the repository a linked worktree belongs to."""
-    common = Path(git_dir.partition("/worktrees/")[0])
+    common = Path(common_dir)
     name = common.parent.name if common.name == ".git" else common.stem
     return name or None
 
@@ -321,6 +347,10 @@ def _git(root: Path, *args: str) -> str | None:
             # them back through os.fsencode() when we later stat the file.
             errors="surrogateescape",
             timeout=_TIMEOUT,
+            # A child sharing the TUI's stdin would swallow the user's keystrokes.
+            stdin=subprocess.DEVNULL,
+            # Some of this output is parsed; keep git out of the user's locale.
+            env={**os.environ, "LC_ALL": "C"},
         )
     except (OSError, ValueError, subprocess.SubprocessError):
         return None

@@ -30,3 +30,14 @@ def init_repo(root: Path, branch: str = "main") -> Path:
     git(root, "init", "-b", branch)
     commit(root, "README.md", "Initial commit")
     return root
+
+
+def clone_repo(parent: Path, origin: Path, dest: Path) -> Path:
+    """Clone ``origin`` to ``dest``; the remote is a local path, never a URL."""
+    git(parent, "clone", "--quiet", str(origin), str(dest))
+    return dest
+
+
+def track_upstream(repo: Path, branch: str, upstream: str) -> None:
+    """Point ``branch`` at ``upstream`` without contacting anything."""
+    git(repo, "branch", f"--set-upstream-to={upstream}", branch)
