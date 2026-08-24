@@ -14,7 +14,8 @@ import pytest
 
 from task_viewer.app import (
     _ROW_BRANCH_WIDTH,
-    _WORKTREE_BRANCH_WIDTH,
+    _WORKTREE_NAME_WIDTH,
+    _format_folded_note,
     _format_project_row,
     _format_worktree_row,
     _dirty_note,
@@ -196,57 +197,89 @@ def test_plural(count: int, expected: str) -> None:
 # --- worktree rows nested under a repo --------------------------------------
 
 
-def test_a_worktree_row_leads_with_its_branch() -> None:
-    row = _format_worktree_row(_project("gimle-example-feature"), _info())
-    assert "⎇ feat/thing" in row
-    assert "↑1" in row
+_REPO = _project("gimle-mimir")
 
 
-def test_a_worktree_row_gets_a_narrower_branch_budget() -> None:
-    """It is indented under its repo, so it has less room than a repo row."""
-    long_branch = _info(branch="feat/" + "x" * 40)
-    nested = _format_worktree_row(_project("wt"), long_branch)
-    shown = nested.split("⎇ ")[1].split("[/]")[0]
-    assert len(shown) == _WORKTREE_BRANCH_WIDTH
-    assert _WORKTREE_BRANCH_WIDTH < _ROW_BRANCH_WIDTH
+def test_a_worktree_row_is_indented_under_its_repo() -> None:
+    """The indent is the only thing that says this row is a child."""
+    row = _format_worktree_row(_project("gimle-mimir-166"), _REPO, _info())
+    repo_line = _format_project_row(_REPO, _info())
+    assert row.startswith("    ")
+    assert not repo_line.splitlines()[1].startswith("    ")
 
 
-def test_a_worktree_row_falls_back_to_its_folder_name() -> None:
-    row = _format_worktree_row(_project("gimle-example-feature"), None)
-    assert "gimle-example-feature" in row
+def test_a_worktree_row_is_identified_by_its_folder_suffix() -> None:
+    """`166` is what you cd to and where this workspace puts the task number."""
+    row = _format_worktree_row(_project("gimle-mimir-166"), _REPO, _info())
+    assert "166" in row
+    assert "gimle-mimir-166" not in row
 
 
-def test_a_collapsed_repo_reports_what_is_folded_away() -> None:
-    row = _format_project_row(
-        _project("gimle-mimir"),
-        _info(branch="main", is_worktree=False),
-        worktrees=[_info(ahead=0, subjects=[]), _info(ahead=0, subjects=[]), _info()],
-        expanded=False,
+def test_a_worktree_outside_its_repo_naming_keeps_its_whole_name() -> None:
+    row = _format_worktree_row(_project("unrelated-name"), _REPO, _info())
+    assert "unrelated-name" in row
+
+
+def test_a_worktree_row_still_shows_its_state() -> None:
+    row = _format_worktree_row(_project("gimle-mimir-166"), _REPO, _info(dirty=7))
+    assert "↑1" in row and "✎7" in row
+
+
+def test_a_worktree_row_before_the_scan_shows_only_its_name() -> None:
+    assert _format_worktree_row(_project("gimle-mimir-166"), _REPO, None) == (
+        "    [dim]166[/]"
     )
-    assert "▸" in row
-    assert "3 wt" in row
-    assert "2 merged" in row
 
 
-def test_an_expanded_repo_drops_the_folded_note() -> None:
+def test_a_long_worktree_name_is_ellipsised() -> None:
+    row = _format_worktree_row(_project("gimle-mimir-" + "x" * 40), _REPO, _info())
+    shown = row.strip().split("[")[0].strip()
+    assert len(shown) == _WORKTREE_NAME_WIDTH
+    assert shown.endswith("…")
+
+
+# --- what a collapsed repo says it is hiding --------------------------------
+
+
+def test_the_folded_note_counts_worktrees() -> None:
+    assert "3 wt" in _format_folded_note([_info(), _info(), _info()])
+
+
+def test_the_folded_note_carries_uncommitted_work() -> None:
+    """Hiding `✎` was the regression: it is why you look at worktrees at all."""
+    note = _format_folded_note([_info(dirty=4), _info(), _info(dirty=1)])
+    assert "✎2" in note
+
+
+def test_the_folded_note_warns_when_a_merged_worktree_is_dirty() -> None:
+    """`✔3` alone reads as 'safe to delete'. It is not, if they hold work."""
+    note = _format_folded_note([_info(ahead=0, subjects=[], dirty=9), _info()])
+    assert "✔1⚠" in note
+    assert "bold yellow" in note
+
+
+def test_the_folded_note_is_calm_when_merged_worktrees_are_clean() -> None:
+    note = _format_folded_note([_info(ahead=0, subjects=[]), _info(ahead=0, subjects=[])])
+    assert "✔2" in note
+    assert "⚠" not in note
+    assert "green" in note
+
+
+def test_the_folded_note_survives_an_unscanned_worktree() -> None:
+    assert "2 wt" in _format_folded_note([None, None])
+
+
+def test_the_folded_note_leads_the_line() -> None:
+    """A narrow pane clips the tail, so the fold summary must not be there."""
     row = _format_project_row(
-        _project("gimle-mimir"),
-        _info(branch="main", is_worktree=False),
-        worktrees=[_info(ahead=0, subjects=[])],
-        expanded=True,
+        _REPO, _info(branch="main", is_worktree=False), "▸ ", "3 wt ✎2"
     )
-    assert "▾" in row
-    assert "wt" not in row
+    second = row.splitlines()[1]
+    assert second.index("3 wt") < second.index("main")
 
 
-def test_a_repo_without_worktrees_gets_no_marker() -> None:
-    row = _format_project_row(_project("gimle-hugin"), _info(), worktrees=[])
-    assert "▸" not in row and "▾" not in row
-
-
-def test_a_collapsed_repo_with_nothing_merged_says_only_the_count() -> None:
-    row = _format_project_row(
-        _project("gimle-mimir"), _info(), worktrees=[_info(), _info()], expanded=False
-    )
-    assert "2 wt" in row
-    assert "merged" not in row
+def test_a_repo_row_keeps_its_name_column_without_a_marker() -> None:
+    """Markerless repos must not start two columns left of marked ones."""
+    plain = _format_project_row(_project("gimle-bifrost"), _info())
+    marked = _format_project_row(_REPO, _info(), "▸ ")
+    assert plain.index("gimle-bifrost") == marked.index("gimle-mimir")

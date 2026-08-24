@@ -78,29 +78,40 @@ Worktrees are **folded under the repository they came from**, so a workspace of
 hiding:
 
 ```
-projects · gimle — 7 repos · 12 worktrees · → to open
+projects · gimle — 7 repos · 9 worktrees · → to open
 ────────────────────────────────────────────────────
   ▸ gimle-asgard  13 active
-    ⎇ main ✎5 35m · 3 wt · 3 merged
+    3 wt ✎1 ✔3⚠ · ⎇ main ✎5 1h
     gimle-bifrost  3 active
     ⎇ main ✎3 4w
   ▾ gimle-mimir  36 active
     ⎇ main ✎21 9m
-    ⎇ fix/rewrite_api… ↑2 ↓3 18m
-    ⎇ test/merge_453 ✔merged ✎7 51m
-    ⎇ task/140-deriva… ↑2 ↓224 3w
+      166  ↑2 ↓3 18m
+      453  ✔merged ✎7 51m
+      task-140  ↑2 ↓224 3w
 ```
 
 Press `space` to fold and unfold the highlighted repo (`▸` collapsed, `▾`
-expanded). `3 wt · 3 merged` means three worktrees, all of them already merged
-into the base branch — cleanup waiting, visible without expanding anything.
+expanded). The key is only offered on a repo that actually has worktrees.
 
-* `⎇ branch` — the checked-out branch (truncated to fit)
-* `✔merged` — **the base branch already holds every commit here**; the worktree
-  has served its purpose and can be removed
+A **collapsed** repo leads its second line with what is folded away, because
+that is what survives a narrow pane:
+
+* `3 wt` — three worktrees hidden
+* `✎1` — one of them has uncommitted work
+* `✔3` — three are fully merged and can be removed…
+* `✔3⚠` — …but at least one of those *also* holds uncommitted files, which
+  exist nowhere else. Removing it would lose them.
+
+An **expanded** worktree is listed by its folder suffix rather than its branch —
+`gimle-mimir-166` shows as `166` — because that is what you `cd` to, what
+`git worktree remove` takes, and where this workspace puts the task number. The
+branch is in the right-hand pane.
+
+* `✔merged` — the base branch already holds every commit here
 * `↑n` / `↓n` — commits ahead of / behind the base branch
 * `✎n` — uncommitted changes in the working tree
-* trailing `8m` / `3w` — how long ago the checkout was last touched
+* trailing `9m` / `3w` — how long ago the checkout was last touched
 
 A row says nothing about drift when there is nothing to say: a plain clone
 sitting in sync with its remote just shows its branch and age.
