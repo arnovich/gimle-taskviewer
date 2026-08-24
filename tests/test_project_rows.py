@@ -8,11 +8,15 @@ assert on rendered text. The row markers are driven off constructed
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
 from task_viewer.app import (
     _ROW_BRANCH_WIDTH,
+    _WORKTREE_BRANCH_WIDTH,
+    _format_project_row,
+    _format_worktree_row,
     _dirty_note,
     _drift_note,
     _format_git_line,
@@ -20,8 +24,14 @@ from task_viewer.app import (
     _plural,
 )
 from task_viewer.git_info import GitInfo
+from task_viewer.workspace import Project
 
 _NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
+
+
+def _project(name: str) -> Project:
+    """A project whose tasks folder does not exist — counts come back zero."""
+    return Project(name, Path("/nowhere") / name, Path("/nowhere") / name / "tasks")
 
 
 def _info(**overrides: object) -> GitInfo:
@@ -181,3 +191,62 @@ def test_dirty_note_pluralisation(dirty: int, expected: str) -> None:
 )
 def test_plural(count: int, expected: str) -> None:
     assert _plural(count, "commit") == expected
+
+
+# --- worktree rows nested under a repo --------------------------------------
+
+
+def test_a_worktree_row_leads_with_its_branch() -> None:
+    row = _format_worktree_row(_project("gimle-example-feature"), _info())
+    assert "⎇ feat/thing" in row
+    assert "↑1" in row
+
+
+def test_a_worktree_row_gets_a_narrower_branch_budget() -> None:
+    """It is indented under its repo, so it has less room than a repo row."""
+    long_branch = _info(branch="feat/" + "x" * 40)
+    nested = _format_worktree_row(_project("wt"), long_branch)
+    shown = nested.split("⎇ ")[1].split("[/]")[0]
+    assert len(shown) == _WORKTREE_BRANCH_WIDTH
+    assert _WORKTREE_BRANCH_WIDTH < _ROW_BRANCH_WIDTH
+
+
+def test_a_worktree_row_falls_back_to_its_folder_name() -> None:
+    row = _format_worktree_row(_project("gimle-example-feature"), None)
+    assert "gimle-example-feature" in row
+
+
+def test_a_collapsed_repo_reports_what_is_folded_away() -> None:
+    row = _format_project_row(
+        _project("gimle-mimir"),
+        _info(branch="main", is_worktree=False),
+        worktrees=[_info(ahead=0, subjects=[]), _info(ahead=0, subjects=[]), _info()],
+        expanded=False,
+    )
+    assert "▸" in row
+    assert "3 wt" in row
+    assert "2 merged" in row
+
+
+def test_an_expanded_repo_drops_the_folded_note() -> None:
+    row = _format_project_row(
+        _project("gimle-mimir"),
+        _info(branch="main", is_worktree=False),
+        worktrees=[_info(ahead=0, subjects=[])],
+        expanded=True,
+    )
+    assert "▾" in row
+    assert "wt" not in row
+
+
+def test_a_repo_without_worktrees_gets_no_marker() -> None:
+    row = _format_project_row(_project("gimle-hugin"), _info(), worktrees=[])
+    assert "▸" not in row and "▾" not in row
+
+
+def test_a_collapsed_repo_with_nothing_merged_says_only_the_count() -> None:
+    row = _format_project_row(
+        _project("gimle-mimir"), _info(), worktrees=[_info(), _info()], expanded=False
+    )
+    assert "2 wt" in row
+    assert "merged" not in row

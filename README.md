@@ -70,19 +70,30 @@ nearest `tasks/` folder, so it works from anywhere inside a project. Use
 
 If you run `tv` from a folder that has no tasks of its own but whose child
 folders are projects (e.g. `~/code` containing many repos), the left pane lists
-those child projects instead, with their active-task counts and — for anything
-that is a git checkout — its branch, drift and freshness:
+those child projects instead — with their active-task counts and, for anything
+that is a git checkout, its branch, drift and freshness.
+
+Worktrees are **folded under the repository they came from**, so a workspace of
+30 checkouts reads as a handful of repos. A collapsed repo still says what it is
+hiding:
 
 ```
-projects · gimle — 17 projects · 10 worktrees · → to open
-────────────────────────────────────────────────────────
-  gimle-asgard  13 active
-    ⎇ main ✎5 8m
-  gimle-asgard-proof_kernel  20 active
-    ⎇ feat/strict_rewrite… ✔merged 3h
-  gimle-mimir-task-140  19 active
-    ⎇ task/140-derivative… ↑2 ↓221 3w
+projects · gimle — 7 repos · 12 worktrees · → to open
+────────────────────────────────────────────────────
+  ▸ gimle-asgard  13 active
+    ⎇ main ✎5 35m · 3 wt · 3 merged
+    gimle-bifrost  3 active
+    ⎇ main ✎3 4w
+  ▾ gimle-mimir  36 active
+    ⎇ main ✎21 9m
+    ⎇ fix/rewrite_api… ↑2 ↓3 18m
+    ⎇ test/merge_453 ✔merged ✎7 51m
+    ⎇ task/140-deriva… ↑2 ↓224 3w
 ```
+
+Press `space` to fold and unfold the highlighted repo (`▸` collapsed, `▾`
+expanded). `3 wt · 3 merged` means three worktrees, all of them already merged
+into the base branch — cleanup waiting, visible without expanding anything.
 
 * `⎇ branch` — the checked-out branch (truncated to fit)
 * `✔merged` — **the base branch already holds every commit here**; the worktree
@@ -94,12 +105,13 @@ projects · gimle — 17 projects · 10 worktrees · → to open
 A row says nothing about drift when there is nothing to say: a plain clone
 sitting in sync with its remote just shows its branch and age.
 
-Press `→` (or `Enter`) to step into a project and see its task list; press `←`
-to step back out to the project list. Everything else works the same once
-you're inside a project.
+Press `→` (or `Enter`) to step into a project — a repo or one of its worktrees —
+and see its task list; press `←` to step back out. Everything else works the
+same once you're inside.
 
-The git scan runs in a background thread, so the list paints immediately and
-fills in its branch lines a moment later.
+Grouping is read from each worktree's `.git` pointer file, which costs nothing,
+so the tree is correct the instant the list paints. The git *state* is scanned
+in a background thread and fills in a moment later.
 
 ## Keeping track of worktrees
 
@@ -157,6 +169,7 @@ one won't appear.
 | `↑` / `↓`  | Move in the list / scroll the markdown             |
 | `j` / `k`  | Move down / up in the list                         |
 | `→` / `←`  | Enter a project / step back to the project list (workspace mode) |
+| `space`    | Fold or unfold a repo's worktrees (workspace mode)  |
 | `Tab`      | Switch focus between the two panes                 |
 | `c`        | **Work on the task with Claude Code** (see below)  |
 | `R`        | **Review all tasks** with Claude Code, in the background (see below) |

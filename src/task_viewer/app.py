@@ -22,11 +22,13 @@ from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.widgets import Footer, Header, Label, ListItem, ListView, Markdown
 
+from dataclasses import dataclass
+
 from .discovery import STATES, Task, count_states, load_tasks
 from .git_info import GitInfo, describe_age, format_moment, load_git_info
 from .groom import GroomResult, run_groom
 from .state_ops import StateChangeError, set_state
-from .workspace import Project
+from .workspace import Project, ProjectGroup, group_projects
 
 _PRIORITY_STYLE = {
     "high": "bold red",
@@ -55,8 +57,19 @@ _TASK_ACTIONS = frozenset(
 _EMPTY_BODY = "*Select a task on the left. Press `Tab` to move between panes.*"
 
 # Branch names are long ("feat/strict_rewrite_proof_kernel") and the list pane is
-# narrow, so rows show a truncated form and the summary pane the full one.
+# narrow, so rows show a truncated form and the summary pane the full one. A
+# worktree row is indented under its repo and gets correspondingly less room.
 _ROW_BRANCH_WIDTH = 20
+_WORKTREE_BRANCH_WIDTH = 16
+
+
+@dataclass
+class _Row:
+    """One visible entry in the project list: a repo, or one of its worktrees."""
+
+    project: Project
+    group: ProjectGroup
+    is_worktree: bool
 
 
 class TaskListView(ListView):
@@ -106,6 +119,7 @@ class TaskViewerApp(App):
         Binding("left", "back", "Projects", show=True),
         Binding("l", "enter_project", "Open", show=False),
         Binding("h", "back", "Projects", show=False),
+        Binding("space", "toggle_group", "Expand", show=True),
         Binding("c", "work_on_task", "Work (Claude)", show=True),
         Binding("R", "groom", "Review all", show=True),
         Binding("g", "mark_ongoing", "Ongoing", show=False),
@@ -140,6 +154,9 @@ class TaskViewerApp(App):
         self._tasks_dir: Path | None = None
         self._tasks: list[Task] = []
         self._git_info: dict[Path, GitInfo | None] = {}
+        self._groups = group_projects(projects) if workspace else []
+        self._rows: list[_Row] = []
+        self._expanded: set[Path] = set()
 
     @classmethod
     def single(
@@ -176,6 +193,8 @@ class TaskViewerApp(App):
             return True if self._level == "projects" else None
         if action == "back":
             return True if self._level == "tasks" and self._workspace else None
+        if action == "toggle_group":
+            return True if self._level == "projects" else None
         if action in _TASK_ACTIONS:
             return True if self._level == "tasks" else None
         return True
@@ -183,11 +202,27 @@ class TaskViewerApp(App):
     # --- navigation ------------------------------------------------------
 
     def action_enter_project(self) -> None:
-        if self._level != "projects":
+        row = self._current_row()
+        if row is not None:
+            self._enter_project(row.project)
+
+    def action_toggle_group(self) -> None:
+        """Fold or unfold the highlighted repo's worktrees."""
+        row = self._current_row()
+        if row is None or not row.group.has_worktrees:
             return
+        # On a worktree row, fold the repo it belongs to rather than nothing.
+        key = row.group.project.path
+        self._expanded.symmetric_difference_update({key})
+        self._build_project_rows(keep=key)
+
+    def _current_row(self) -> _Row | None:
+        if self._level != "projects":
+            return None
         index = self.query_one(TaskListView).index
-        if index is not None and 0 <= index < len(self._projects):
-            self._enter_project(self._projects[index])
+        if index is not None and 0 <= index < len(self._rows):
+            return self._rows[index]
+        return None
 
     def action_back(self) -> None:
         if self._level == "tasks" and self._workspace:
@@ -213,29 +248,51 @@ class TaskViewerApp(App):
         self.title = f"projects · {self._workspace_name}"
         self.refresh_bindings()
 
-        list_view = self.query_one(TaskListView)
-        list_view.clear()
-        for project in self._projects:
-            row = _format_project_row(project, self._git_info.get(project.path))
-            list_view.append(ListItem(Label(row)))
-        self._update_projects_subtitle()
-
-        index = _index_of(
-            [p.name for p in self._projects], self._last_project_name
-        )
-        if self._projects:
-            list_view.index = index
-            self._show_project_summary(self._projects[index])
-        list_view.focus()
+        self._build_project_rows(keep=self._last_project_path())
+        self.query_one(TaskListView).focus()
         # Shelling out to git for every project would freeze the UI, so rows go
         # up with whatever was known last and are repainted when the scan lands.
         self._load_git_info()
 
-    def _update_projects_subtitle(self) -> None:
-        worktrees = sum(
-            1 for info in self._git_info.values() if info and info.is_worktree
+    def _last_project_path(self) -> Path | None:
+        for project in self._projects:
+            if project.name == self._last_project_name:
+                return project.path
+        return None
+
+    def _build_project_rows(self, *, keep: Path | None = None) -> None:
+        """Rebuild the visible rows from the groups and what is expanded."""
+        self._rows = []
+        for group in self._groups:
+            self._rows.append(_Row(group.project, group, is_worktree=False))
+            if group.project.path in self._expanded:
+                for worktree in group.worktrees:
+                    self._rows.append(_Row(worktree, group, is_worktree=True))
+
+        list_view = self.query_one(TaskListView)
+        list_view.clear()
+        for row in self._rows:
+            list_view.append(ListItem(Label(self._row_label(row))))
+        self._update_projects_subtitle()
+
+        index = next(
+            (i for i, row in enumerate(self._rows) if row.project.path == keep), 0
         )
-        summary = f"{len(self._projects)} projects"
+        if self._rows:
+            list_view.index = index
+            self._show_project_summary(self._rows[index].project)
+
+    def _row_label(self, row: _Row) -> str:
+        info = self._git_info.get(row.project.path)
+        if row.is_worktree:
+            return _format_worktree_row(row.project, info)
+        expanded = row.group.project.path in self._expanded
+        hidden = [self._git_info.get(w.path) for w in row.group.worktrees]
+        return _format_project_row(row.project, info, hidden, expanded)
+
+    def _update_projects_subtitle(self) -> None:
+        worktrees = sum(len(group.worktrees) for group in self._groups)
+        summary = _plural(len(self._groups), "repo" if worktrees else "project")
         if worktrees:
             summary += f" · {_plural(worktrees, 'worktree')}"
         self.sub_title = f"{summary} · → to open"
@@ -251,13 +308,11 @@ class TaskViewerApp(App):
         if self._level != "projects":
             return
         list_view = self.query_one(TaskListView)
-        rows = list_view.query(Label)
-        for project, label in zip(self._projects, rows):
-            label.update(_format_project_row(project, scanned.get(project.path)))
-        self._update_projects_subtitle()
+        for row, label in zip(self._rows, list_view.query(Label)):
+            label.update(self._row_label(row))
         index = list_view.index
-        if index is not None and 0 <= index < len(self._projects):
-            self._show_project_summary(self._projects[index])
+        if index is not None and 0 <= index < len(self._rows):
+            self._show_project_summary(self._rows[index].project)
 
     # --- task actions ----------------------------------------------------
 
@@ -452,8 +507,8 @@ class TaskViewerApp(App):
         if index is None:
             return
         if self._level == "projects":
-            if 0 <= index < len(self._projects):
-                self._show_project_summary(self._projects[index])
+            if 0 <= index < len(self._rows):
+                self._show_project_summary(self._rows[index].project)
         elif 0 <= index < len(self._tasks):
             self._show_task(self._tasks[index])
 
@@ -499,20 +554,51 @@ def _format_row(task: Task, number_width: int) -> str:
     return f"[dim]{mark} {(task.number or '').rjust(number_width)}[/] {body}"
 
 
-def _format_project_row(project: Project, info: GitInfo | None) -> str:
-    """Two lines: the project and its task count, then its git state."""
+def _format_project_row(
+    project: Project,
+    info: GitInfo | None,
+    worktrees: list[GitInfo | None] | None = None,
+    expanded: bool = False,
+) -> str:
+    """Two lines: the project and its task count, then its git state.
+
+    When the project has worktrees folded under it, the git line also says how
+    many and how many have already landed — so a collapsed repo still tells you
+    there is cleanup waiting.
+    """
     counts = count_states(project.tasks_dir)
     active = counts["open"] + counts["ongoing"]
-    row = f"{escape(project.name)}  [dim]{active} active[/]"
+    marker = ""
+    if worktrees:
+        marker = "[dim]▾[/] " if expanded else "[dim]▸[/] "
+    row = f"{marker}{escape(project.name)}  [dim]{active} active[/]"
     git_line = _format_git_line(info)
-    return f"{row}\n{git_line}" if git_line else row
+    if worktrees and not expanded:
+        git_line = (git_line or "  ") + _format_folded_note(worktrees)
+    return f"{row}\n{git_line}" if git_line.strip() else row
 
 
-def _format_git_line(info: GitInfo | None) -> str:
+def _format_folded_note(worktrees: list[GitInfo | None]) -> str:
+    """`· 8 wt · 5 merged` — what is hidden under a collapsed repo."""
+    merged = sum(1 for info in worktrees if info and info.merged)
+    note = f" [dim]· {len(worktrees)} wt[/]"
+    if merged:
+        note += f" [green]· {merged} merged[/]"
+    return note
+
+
+def _format_worktree_row(project: Project, info: GitInfo | None) -> str:
+    """One indented line for a worktree: its branch is its identity."""
+    if info is None:
+        return f"  [dim]{escape(project.name)}[/]"
+    return "  " + _format_git_line(info, _WORKTREE_BRANCH_WIDTH).lstrip()
+
+
+def _format_git_line(info: GitInfo | None, width: int = _ROW_BRANCH_WIDTH) -> str:
     """Compact branch · drift · dirty · age line shown under a project row."""
     if info is None:
         return ""
-    parts = [f"[dim]⎇ {escape(_shorten(info.branch, _ROW_BRANCH_WIDTH))}[/]"]
+    parts = [f"[dim]⎇ {escape(_shorten(info.branch, width))}[/]"]
     if info.merged:
         # Nothing of its own left outside the base branch. For a worktree that
         # is the whole story — it can go — so `behind` would only be noise. A
