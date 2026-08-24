@@ -33,6 +33,7 @@ from .git_info import (
     load_git_info,
 )
 from .groom import GroomResult, run_groom
+from .queue_ops import QueueError, clear_next, enqueue, promote
 from .remote import UpdateResult, cancel_all, fast_forward, fetch
 from .state_ops import StateChangeError, set_state
 from .workspace import Project, ProjectGroup, group_projects
@@ -53,6 +54,9 @@ _TASK_ACTIONS = frozenset(
     {
         "work_on_task",
         "groom",
+        "queue_task",
+        "promote_task",
+        "unqueue_task",
         "mark_ongoing",
         "mark_done",
         "mark_open",
@@ -131,6 +135,9 @@ class TaskViewerApp(App):
         Binding("u", "update", "Update", show=True),
         Binding("c", "work_on_task", "Work (Claude)", show=True),
         Binding("R", "groom", "Review all", show=True),
+        Binding("n", "queue_task", "Queue next", show=True),
+        Binding("p", "promote_task", "Queue first", show=False),
+        Binding("N", "unqueue_task", "Unqueue", show=False),
         Binding("g", "mark_ongoing", "Ongoing", show=False),
         Binding("x", "mark_done", "Done", show=True),
         Binding("u", "mark_open", "Reopen", show=False),
@@ -165,6 +172,10 @@ class TaskViewerApp(App):
         self._git_info: dict[Path, GitInfo | None] = {}
         self._groups = group_projects(projects) if workspace else []
         self._rows: list[_Row] = []
+        # The selection the app intends, tracked here rather than read back from
+        # the ListView, whose index is transiently None while it re-populates.
+        self._selected_path: Path | None = None
+        self._rebuilding = False
         self._expanded: set[Path] = set()
         self._fetching = False
         self._unreachable: set[Path] = set()
@@ -346,22 +357,42 @@ class TaskViewerApp(App):
                     self._rows.append(_Row(worktree, group, is_worktree=True))
 
         list_view = self.query_one(TaskListView)
-        list_view.clear()
-        for row in self._rows:
-            list_view.append(ListItem(Label(self._row_label(row))))
-        self._update_projects_subtitle()
+        # Highlight events fired while the list re-populates describe rows that
+        # are on their way out; they must not overwrite the intended selection.
+        self._rebuilding = True
+        try:
+            list_view.clear()
+            for row in self._rows:
+                list_view.append(ListItem(Label(self._row_label(row))))
+            self._update_projects_subtitle()
 
-        index = next(
-            (i for i, row in enumerate(self._rows) if row.project.path == keep), 0
-        )
+            # Prefer the row the caller named; fall back to wherever the cursor
+            # already is, so a background rebuild never teleports it to the top.
+            index = None
+            for candidate in (keep, self._selected_path):
+                if candidate is None:
+                    continue
+                index = next(
+                    (i for i, r in enumerate(self._rows) if r.project.path == candidate),
+                    None,
+                )
+                if index is not None:
+                    break
+            if index is None:
+                index = 0
+            index = min(index, len(self._rows) - 1) if self._rows else 0
+            if self._rows:
+                self._selected_path = self._rows[index].project.path
+                # Set it now so the very next keypress acts on the right row...
+                _select(list_view, index)
+                self._show_project_summary(self._rows[index].project)
+        finally:
+            self._rebuilding = False
         if self._rows:
-            # Set it now so the very next keypress acts on the right row...
-            list_view.index = index
-            self._show_project_summary(self._rows[index].project)
             # ...and again once the list has settled, so the cursor is visible.
             self.call_after_refresh(self._repaint_cursor, index)
 
-    def _repaint_cursor(self, index: int) -> None:
+    def _repaint_cursor(self, index: int) -> None:  # noqa: D401 - see docstring
         """Re-assert the highlight after ``ListView.clear()`` has pruned.
 
         The prune is asynchronous, so the index assigned right after it lands on
@@ -372,13 +403,22 @@ class TaskViewerApp(App):
         if not self._rows:
             return
         list_view = self.query_one(TaskListView)
-        index = min(index, len(self._rows) - 1)
-        # A row highlighted before the prune can survive it at a new position,
-        # leaving two bars lit, so clear them all before re-selecting.
-        for item in list_view.query(ListItem):
-            item.highlighted = False
-        list_view.index = None
-        list_view.index = index
+        # The rows may have been rebuilt again since this was scheduled; the
+        # tracked selection is the authority, not the index we were handed.
+        index = next(
+            (i for i, row in enumerate(self._rows)
+             if row.project.path == self._selected_path),
+            min(index, len(self._rows) - 1),
+        )
+        self._rebuilding = True
+        try:
+            # A row highlighted before the prune can survive it at a new
+            # position, leaving two bars lit, so clear them all first.
+            for item in list_view.query(ListItem):
+                item.highlighted = False
+            _select(list_view, index)
+        finally:
+            self._rebuilding = False
 
     def _row_label(self, row: _Row) -> str:
         info = self._git_info.get(row.project.path)
@@ -463,6 +503,34 @@ class TaskViewerApp(App):
 
     def action_mark_open(self) -> None:
         self._change_state("open")
+
+    def action_queue_task(self) -> None:
+        """Add the selected task to the end of the owner's work queue."""
+        self._change_queue(enqueue, "queued")
+
+    def action_promote_task(self) -> None:
+        """Move the selected task to the front of the work queue."""
+        self._change_queue(promote, "queued first")
+
+    def action_unqueue_task(self) -> None:
+        """Take the selected task out of the work queue."""
+        self._change_queue(None, "unqueued")
+
+    def _change_queue(self, operation, verb: str) -> None:
+        task = self._current_task()
+        if task is None or self._tasks_dir is None:
+            return
+        try:
+            if operation is None:
+                clear_next(task)
+                detail = ""
+            else:
+                detail = f" as #{operation(task, self._tasks_dir)}"
+        except QueueError as error:
+            self.notify(str(error), severity="error", timeout=6)
+            return
+        self.notify(f"{task.task_id} {verb}{detail}")
+        self._refresh_tasks(keep_selection=True)
 
     def action_work_on_task(self) -> None:
         """Mark the selected task ongoing, then launch Claude Code on it."""
@@ -639,7 +707,10 @@ class TaskViewerApp(App):
         if index is None:
             return
         if self._level == "projects":
+            if self._rebuilding:
+                return
             if 0 <= index < len(self._rows):
+                self._selected_path = self._rows[index].project.path
                 self._show_project_summary(self._rows[index].project)
             self.refresh_bindings()  # `space` only applies on a repo with worktrees
         elif 0 <= index < len(self._tasks):
@@ -675,7 +746,7 @@ class TaskViewerApp(App):
 
 
 def _format_row(task: Task, number_width: int) -> str:
-    """Rich-markup label for one task row: state, id number, priority, title.
+    """Rich-markup label for one task row: state, id, queue rank, title.
 
     ``number_width`` is the widest id number in the list; a task without one is
     padded to the same width so every title starts in the same column.
@@ -684,9 +755,10 @@ def _format_row(task: Task, number_width: int) -> str:
     style = _PRIORITY_STYLE.get((task.priority or "").lower(), "")
     title = escape(task.title)
     body = f"[{style}]{title}[/]" if style else title
+    rank = f"[bold cyan]{task.next_rank}[/] " if task.next_rank else ""
     if not number_width:
-        return f"[dim]{mark}[/] {body}"
-    return f"[dim]{mark} {(task.number or '').rjust(number_width)}[/] {body}"
+        return f"[dim]{mark}[/] {rank}{body}"
+    return f"[dim]{mark} {(task.number or '').rjust(number_width)}[/] {rank}{body}"
 
 
 def _format_project_row(
@@ -814,6 +886,8 @@ def _shorten(text: str, width: int) -> str:
 def _meta_line(task: Task) -> str:
     """A small metadata line rendered above the task body."""
     parts: list[str] = [f"`{task.task_id}`", f"*{task.state}*"]
+    if task.next_rank:
+        parts.append(f"**next #{task.next_rank}**")
     if task.priority:
         parts.append(f"priority: {task.priority}")
     if task.labels:
@@ -824,6 +898,16 @@ def _meta_line(task: Task) -> str:
 def _number_width(tasks: list[Task]) -> int:
     """Width of the widest id number present, or 0 when none of them have one."""
     return max((len(task.number or "") for task in tasks), default=0)
+
+
+def _select(list_view: TaskListView, index: int) -> None:
+    """Move the cursor and make sure the highlight follows.
+
+    Assigning an index it already holds does not fire Textual's watcher, so a
+    freshly rebuilt list would keep its cursor position with no bar drawn.
+    """
+    list_view.index = None
+    list_view.index = index
 
 
 def _index_of(names: list[str], target: str | None) -> int:
