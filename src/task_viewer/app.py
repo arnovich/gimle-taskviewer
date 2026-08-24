@@ -23,6 +23,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Footer, Header, Label, ListItem, ListView, Markdown
 
 from .discovery import STATES, Task, count_states, load_tasks
+from .git_info import GitInfo, describe_age, format_moment, load_git_info
 from .groom import GroomResult, run_groom
 from .state_ops import StateChangeError, set_state
 from .workspace import Project
@@ -52,6 +53,10 @@ _TASK_ACTIONS = frozenset(
 )
 
 _EMPTY_BODY = "*Select a task on the left. Press `Tab` to move between panes.*"
+
+# Branch names are long ("feat/strict_rewrite_proof_kernel") and the list pane is
+# narrow, so rows show a truncated form and the summary pane the full one.
+_ROW_BRANCH_WIDTH = 20
 
 
 class TaskListView(ListView):
@@ -134,6 +139,7 @@ class TaskViewerApp(App):
         self._last_project_name: str | None = None
         self._tasks_dir: Path | None = None
         self._tasks: list[Task] = []
+        self._git_info: dict[Path, GitInfo | None] = {}
 
     @classmethod
     def single(
@@ -210,8 +216,9 @@ class TaskViewerApp(App):
         list_view = self.query_one(TaskListView)
         list_view.clear()
         for project in self._projects:
-            list_view.append(ListItem(Label(_format_project_row(project))))
-        self.sub_title = f"{len(self._projects)} projects · → to open"
+            row = _format_project_row(project, self._git_info.get(project.path))
+            list_view.append(ListItem(Label(row)))
+        self._update_projects_subtitle()
 
         index = _index_of(
             [p.name for p in self._projects], self._last_project_name
@@ -220,6 +227,37 @@ class TaskViewerApp(App):
             list_view.index = index
             self._show_project_summary(self._projects[index])
         list_view.focus()
+        # Shelling out to git for every project would freeze the UI, so rows go
+        # up with whatever was known last and are repainted when the scan lands.
+        self._load_git_info()
+
+    def _update_projects_subtitle(self) -> None:
+        worktrees = sum(
+            1 for info in self._git_info.values() if info and info.is_worktree
+        )
+        summary = f"{len(self._projects)} projects"
+        if worktrees:
+            summary += f" · {_plural(worktrees, 'worktree')}"
+        self.sub_title = f"{summary} · → to open"
+
+    @work(thread=True, group="git_info", exclusive=True)
+    def _load_git_info(self) -> None:
+        """Scan every project's git state off the event loop."""
+        scanned = {project.path: load_git_info(project.path) for project in self._projects}
+        self.call_from_thread(self._on_git_info, scanned)
+
+    def _on_git_info(self, scanned: dict[Path, GitInfo | None]) -> None:
+        self._git_info = scanned
+        if self._level != "projects":
+            return
+        list_view = self.query_one(TaskListView)
+        rows = list_view.query(Label)
+        for project, label in zip(self._projects, rows):
+            label.update(_format_project_row(project, scanned.get(project.path)))
+        self._update_projects_subtitle()
+        index = list_view.index
+        if index is not None and 0 <= index < len(self._projects):
+            self._show_project_summary(self._projects[index])
 
     # --- task actions ----------------------------------------------------
 
@@ -431,9 +469,8 @@ class TaskViewerApp(App):
             "",
             f"**{counts['open']}** open · **{counts['ongoing']}** ongoing · "
             f"**{counts['closed']}** closed",
-            "",
-            "Press `→` or `Enter` to open.",
         ]
+        lines += _git_section(self._git_info.get(project.path))
         active = load_tasks(project.tasks_dir, _ACTIVE_STATES)
         if active:
             lines += ["", "## Active tasks", ""]
@@ -441,6 +478,7 @@ class TaskViewerApp(App):
                 lines.append(f"- {_STATE_MARK[task.state]} {task.title}")
             if len(active) > 25:
                 lines.append(f"- …and {len(active) - 25} more")
+        lines += ["", "*Press `→` or `Enter` to open.*"]
         self.query_one(Markdown).update("\n".join(lines))
 
 
@@ -453,10 +491,40 @@ def _format_row(task: Task) -> str:
     return f"[dim]{mark}[/] {body}"
 
 
-def _format_project_row(project: Project) -> str:
+def _format_project_row(project: Project, info: GitInfo | None) -> str:
+    """Two lines: the project and its task count, then its git state."""
     counts = count_states(project.tasks_dir)
     active = counts["open"] + counts["ongoing"]
-    return f"{escape(project.name)}  [dim]{active} active[/]"
+    row = f"{escape(project.name)}  [dim]{active} active[/]"
+    git_line = _format_git_line(info)
+    return f"{row}\n{git_line}" if git_line else row
+
+
+def _format_git_line(info: GitInfo | None) -> str:
+    """Compact branch · drift · dirty · age line shown under a project row."""
+    if info is None:
+        return ""
+    parts = [f"[dim]⎇ {escape(_shorten(info.branch, _ROW_BRANCH_WIDTH))}[/]"]
+    if info.merged:
+        # Nothing of its own left outside the base branch. For a worktree that
+        # is the whole story — it can go — so `behind` would only be noise. A
+        # main checkout in sync is the unremarkable case, so it says nothing.
+        if info.is_worktree:
+            parts.append("[green]✔merged[/]")
+    else:
+        if info.ahead:
+            parts.append(f"[green]↑{info.ahead}[/]")
+        if info.behind:
+            parts.append(f"[dim]↓{info.behind}[/]")
+    if info.dirty:
+        style = "bold yellow" if info.merged else "cyan"
+        parts.append(f"[{style}]✎{info.dirty}[/]")
+    parts.append(f"[dim]{describe_age(info.updated)}[/]")
+    return "  " + " ".join(parts)
+
+
+def _shorten(text: str, width: int) -> str:
+    return text if len(text) <= width else text[: width - 1] + "…"
 
 
 def _meta_line(task: Task) -> str:
@@ -473,3 +541,67 @@ def _index_of(names: list[str], target: str | None) -> int:
     if target is not None and target in names:
         return names.index(target)
     return 0
+
+
+def _git_section(info: GitInfo | None) -> list[str]:
+    """Markdown lines: when the checkout was made, last touched, and its drift."""
+    if info is None:
+        return []
+    heading = f"`{info.branch}`"
+    if info.repo:
+        heading += f" · worktree of `{info.repo}`"
+    lines = [
+        "",
+        f"## {info.kind.capitalize()}",
+        "",
+        heading,
+        "",
+        # A worktree has a real birth date; a plain clone only knows when its
+        # current branch started, which changes the moment you switch branches.
+        f"- **{'Created' if info.is_worktree else 'Branch since'}** "
+        f"{format_moment(info.created)}",
+        f"- **Updated** {format_moment(info.updated)}{_dirty_note(info)}",
+        f"- {_drift_note(info)}",
+    ]
+    if info.merged and info.is_worktree and info.dirty:
+        lines += [
+            "",
+            f"> ⚠ Merged, but {_plural(info.dirty, 'file')} here "
+            "are uncommitted — they exist nowhere else.",
+        ]
+    if info.subjects:
+        lines += [
+            "",
+            f"### {_plural(info.ahead, 'commit')} not in `{info.base}`",
+            "",
+        ]
+        lines += [f"- {message}" for message in info.subjects]
+        if info.ahead > len(info.subjects):
+            lines.append(f"- …and {info.ahead - len(info.subjects)} more")
+    return lines
+
+
+def _drift_note(info: GitInfo) -> str:
+    """How this checkout stands against its base, as a whole bullet line."""
+    if info.base is None:
+        return "**Base** no `main`/`master` branch to compare against"
+    if info.merged:
+        # `ahead == 0` means the base already holds every commit here. For a
+        # worktree that is the headline: the work landed, the directory can go.
+        if info.is_worktree:
+            return f"**Merged** fully into `{info.base}` — nothing of its own left"
+        return f"**In sync** with `{info.base}` — nothing unpushed"
+    parts = [f"**Base** `{info.base}`", f"**{info.ahead} ahead**"]
+    if info.behind:
+        parts.append(f"{info.behind} behind")
+    return " · ".join(parts)
+
+
+def _dirty_note(info: GitInfo) -> str:
+    if not info.dirty:
+        return ""
+    return f" · {_plural(info.dirty, 'uncommitted file')}"
+
+
+def _plural(count: int, word: str) -> str:
+    return f"{count} {word}" if count == 1 else f"{count} {word}s"
