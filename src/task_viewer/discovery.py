@@ -22,6 +22,7 @@ _FRAGMENT_ORDER = ("description.md", "spec.md", "plan.md")
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 _HEADING_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
+_NUMBER_RE = re.compile(r"(\d+)")
 
 
 class TasksNotFoundError(Exception):
@@ -41,11 +42,19 @@ class Task:
     priority: str | None = None
 
     @property
+    def number(self) -> str | None:
+        """The leading id number of the filename (``052``), when it has one.
+
+        Kept as text so the author's zero-padding survives into the display.
+        """
+        match = _NUMBER_RE.match(self.task_id)
+        return match.group(1) if match else None
+
+    @property
     def sort_key(self) -> tuple[int, str]:
         """Sort numerically by leading id number when present, else by name."""
-        match = re.match(r"(\d+)", self.task_id)
-        number = int(match.group(1)) if match else 1_000_000
-        return (number, self.task_id)
+        number = self.number
+        return (int(number) if number else 1_000_000, self.task_id)
 
 
 def find_tasks_dir(start: Path, folder_name: str = "tasks") -> Path:

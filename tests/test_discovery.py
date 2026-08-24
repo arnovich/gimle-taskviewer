@@ -69,3 +69,18 @@ def test_directory_task_concatenates_fragments(project: Path) -> None:
     assert dir_task.labels == ["multi"]
     assert "Description part." in dir_task.body
     assert "The plan part." in dir_task.body
+
+
+def test_task_number_comes_from_the_filename(project: Path) -> None:
+    tasks = {task.task_id: task for task in load_tasks(project / "tasks")}
+    assert tasks["052-heat-equation"].number == "052"
+    assert tasks["010-dir-task"].number == "010"  # directory-style task
+
+
+def test_a_task_without_a_leading_number_has_none(tmp_path: Path) -> None:
+    open_dir = tmp_path / "tasks" / "open"
+    open_dir.mkdir(parents=True)
+    (open_dir / "add-smooth-hyperbolic-functions.md").write_text("# Smooth\n")
+
+    task = load_tasks(tmp_path / "tasks")[0]
+    assert task.number is None

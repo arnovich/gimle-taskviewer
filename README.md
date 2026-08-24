@@ -170,6 +170,18 @@ one won't appear.
 Task priority is colour-coded in the list (high = red, medium = yellow,
 low = dim); `○` marks an open task, `◐` ongoing, `●` closed.
 
+The leading id number of the filename is shown next to the state mark, so
+`052-2d-heat-equation.md` lists as `○ 052 2D heat equation`. Tasks that have no
+number are padded to the same width, keeping every title in one column:
+
+```
+  ○ 030 Bash sandbox — remaining cross-backend work
+  ○ 032 Bash sandbox — per-agent persistent volumes
+  ○     Bash sandbox — roadmap index
+```
+
+A project whose tasks are all unnumbered gets no such column at all.
+
 ## Working on a task with Claude Code
 
 Press `c` on a task and `tv` will:
