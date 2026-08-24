@@ -23,6 +23,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Footer, Header, Label, ListItem, ListView, Markdown
 
 from .discovery import STATES, Task, count_states, load_tasks
+from .git_info import GitInfo, describe_age, format_moment, load_git_info
 from .groom import GroomResult, run_groom
 from .state_ops import StateChangeError, set_state
 from .workspace import Project
@@ -52,6 +53,10 @@ _TASK_ACTIONS = frozenset(
 )
 
 _EMPTY_BODY = "*Select a task on the left. Press `Tab` to move between panes.*"
+
+# Branch names are long ("feat/strict_rewrite_proof_kernel") and the list pane is
+# narrow, so rows show a truncated form and the summary pane the full one.
+_ROW_BRANCH_WIDTH = 24
 
 
 class TaskListView(ListView):
@@ -134,6 +139,7 @@ class TaskViewerApp(App):
         self._last_project_name: str | None = None
         self._tasks_dir: Path | None = None
         self._tasks: list[Task] = []
+        self._git_info: dict[Path, GitInfo | None] = {}
 
     @classmethod
     def single(
@@ -209,9 +215,17 @@ class TaskViewerApp(App):
 
         list_view = self.query_one(TaskListView)
         list_view.clear()
+        self._git_info = {p.path: load_git_info(p.path) for p in self._projects}
         for project in self._projects:
-            list_view.append(ListItem(Label(_format_project_row(project))))
-        self.sub_title = f"{len(self._projects)} projects · → to open"
+            row = _format_project_row(project, self._git_info.get(project.path))
+            list_view.append(ListItem(Label(row)))
+        worktrees = sum(
+            1 for info in self._git_info.values() if info and info.is_worktree
+        )
+        summary = f"{len(self._projects)} projects"
+        if worktrees:
+            summary += f" · {worktrees} worktree{'' if worktrees == 1 else 's'}"
+        self.sub_title = f"{summary} · → to open"
 
         index = _index_of(
             [p.name for p in self._projects], self._last_project_name
@@ -434,6 +448,7 @@ class TaskViewerApp(App):
             "",
             "Press `→` or `Enter` to open.",
         ]
+        lines += _git_section(self._git_info.get(project.path))
         active = load_tasks(project.tasks_dir, _ACTIVE_STATES)
         if active:
             lines += ["", "## Active tasks", ""]
@@ -453,10 +468,32 @@ def _format_row(task: Task) -> str:
     return f"[dim]{mark}[/] {body}"
 
 
-def _format_project_row(project: Project) -> str:
+def _format_project_row(project: Project, info: GitInfo | None) -> str:
+    """Two lines: the project and its task count, then its git state."""
     counts = count_states(project.tasks_dir)
     active = counts["open"] + counts["ongoing"]
-    return f"{escape(project.name)}  [dim]{active} active[/]"
+    row = f"{escape(project.name)}  [dim]{active} active[/]"
+    git_line = _format_git_line(info)
+    return f"{row}\n{git_line}" if git_line else row
+
+
+def _format_git_line(info: GitInfo | None) -> str:
+    """Compact branch · drift · dirty · age line shown under a project row."""
+    if info is None or info.branch is None:
+        return ""
+    parts = [f"[dim]⎇ {escape(_shorten(info.branch, _ROW_BRANCH_WIDTH))}[/]"]
+    if info.ahead:
+        parts.append(f"[green]↑{info.ahead}[/]")
+    if info.behind:
+        parts.append(f"[yellow]↓{info.behind}[/]")
+    if info.dirty:
+        parts.append(f"[cyan]✎{info.dirty}[/]")
+    parts.append(f"[dim]{describe_age(info.updated)}[/]")
+    return "  " + " ".join(parts)
+
+
+def _shorten(text: str, width: int) -> str:
+    return text if len(text) <= width else text[: width - 1] + "…"
 
 
 def _meta_line(task: Task) -> str:
@@ -473,3 +510,49 @@ def _index_of(names: list[str], target: str | None) -> int:
     if target is not None and target in names:
         return names.index(target)
     return 0
+
+
+def _git_section(info: GitInfo | None) -> list[str]:
+    """Markdown lines: when the checkout was made, last touched, and its drift."""
+    if info is None or info.branch is None:
+        return []
+    subject = f"`{info.branch}`"
+    if info.repo:
+        subject += f" · worktree of `{info.repo}`"
+    lines = [
+        "",
+        f"## {info.kind.capitalize()}",
+        "",
+        subject,
+        "",
+        f"- **Created** {format_moment(info.created)}",
+        f"- **Updated** {format_moment(info.updated)}{_dirty_note(info)}",
+        f"- **Base** {_drift_note(info)}",
+    ]
+    if info.subjects:
+        plural = "" if info.ahead == 1 else "s"
+        lines += ["", f"### {info.ahead} commit{plural} not in `{info.base}`", ""]
+        lines += [f"- {message}" for message in info.subjects]
+        if info.ahead > len(info.subjects):
+            lines.append(f"- …and {info.ahead - len(info.subjects)} more")
+    return lines
+
+
+def _drift_note(info: GitInfo) -> str:
+    if info.base is None:
+        return "no `main`/`master` branch to compare against"
+    parts = [f"`{info.base}`"]
+    if info.ahead:
+        parts.append(f"**{info.ahead} ahead**")
+    if info.behind:
+        parts.append(f"{info.behind} behind")
+    if not info.ahead and not info.behind:
+        parts.append("level")
+    return " · ".join(parts)
+
+
+def _dirty_note(info: GitInfo) -> str:
+    if not info.dirty:
+        return ""
+    files = "file" if info.dirty == 1 else "files"
+    return f" · {info.dirty} uncommitted {files}"
