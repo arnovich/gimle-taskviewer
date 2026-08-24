@@ -119,3 +119,242 @@ def test_a_task_without_frontmatter_cannot_be_queued(tmp_path: Path) -> None:
 
     with pytest.raises(QueueError):
         enqueue(load_tasks(tmp_path / "tasks")[0], tmp_path / "tasks")
+
+
+# --- the frontmatter must survive being edited ------------------------------
+
+
+def _write(root: Path, task_id: str, text: str) -> Path:
+    path = root / "tasks" / "open" / f"{task_id}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_a_nested_next_key_is_left_alone(tmp_path: Path) -> None:
+    """`  next:` two spaces in belongs to another mapping, not to the queue."""
+    path = _write(
+        tmp_path,
+        "001-a",
+        "---\ntitle: A\nstate: open\npriority: medium\nlabels: []\n"
+        "claim:\n  agent: grind-7\n  next: after the refactor\n---\n\n# A\n",
+    )
+    tasks_dir = tmp_path / "tasks"
+    enqueue(load_tasks(tasks_dir)[0], tasks_dir)
+
+    text = path.read_text(encoding="utf-8")
+    assert "  next: after the refactor" in text
+    assert "\nnext: 1" in text
+    assert _ranks(tasks_dir)["001-a"] == 1
+
+
+def test_a_block_scalar_is_not_cut_in_half(tmp_path: Path) -> None:
+    """The worst case: it still parses, so nothing errors and data is gone."""
+    body = (
+        "---\ntitle: A\nstate: open\npriority: medium\nlabels: []\n"
+        "resolution: |\n  first line\n  next: finish the sweep\n  last line\n---\n\n# A\n"
+    )
+    path = _write(tmp_path, "001-a", body)
+    tasks_dir = tmp_path / "tasks"
+    enqueue(load_tasks(tasks_dir)[0], tasks_dir)
+
+    text = path.read_text(encoding="utf-8")
+    assert "  next: finish the sweep" in text
+    assert "  last line" in text
+    assert _ranks(tasks_dir)["001-a"] == 1
+
+
+def test_a_differently_cased_key_is_a_different_key(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "001-a",
+        "---\ntitle: A\nstate: open\npriority: medium\nlabels: []\n"
+        "Next: some other meaning\n---\n\n# A\n",
+    )
+    tasks_dir = tmp_path / "tasks"
+    enqueue(load_tasks(tasks_dir)[0], tasks_dir)
+    assert "Next: some other meaning" in path.read_text(encoding="utf-8")
+
+
+def test_crlf_line_endings_survive(tmp_path: Path) -> None:
+    path = tmp_path / "tasks" / "open" / "001-a.md"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(
+        b"---\r\ntitle: A\r\nstate: open\r\npriority: medium\r\nlabels: []\r\n"
+        b"---\r\n\r\n# A\r\n"
+    )
+    tasks_dir = tmp_path / "tasks"
+    enqueue(load_tasks(tasks_dir)[0], tasks_dir)
+
+    raw = path.read_bytes()
+    assert b"\r\n" in raw
+    assert raw.count(b"\n") == raw.count(b"\r\n")  # no line was converted
+    assert _ranks(tasks_dir)["001-a"] == 1
+
+
+def test_a_non_utf8_file_is_refused_rather_than_mangled(tmp_path: Path) -> None:
+    path = tmp_path / "tasks" / "open" / "001-a.md"
+    path.parent.mkdir(parents=True)
+    original = (
+        b"---\ntitle: Caf\xe9 latin-1\nstate: open\npriority: medium\n"
+        b"labels: []\n---\n\n# Body\n"
+    )
+    path.write_bytes(original)
+    tasks_dir = tmp_path / "tasks"
+
+    with pytest.raises(QueueError):
+        enqueue(load_tasks(tasks_dir)[0], tasks_dir)
+    assert path.read_bytes() == original  # untouched, not round-tripped to U+FFFD
+
+
+def test_a_read_only_task_leaves_the_queue_untouched(tmp_path: Path) -> None:
+    """A promote that cannot finish must not renumber half the queue."""
+    _task(tmp_path, "010-a")
+    _task(tmp_path, "020-b")
+    _task(tmp_path, "099-new")
+    tasks_dir = tmp_path / "tasks"
+    by_id = {t.task_id: t for t in load_tasks(tasks_dir)}
+    enqueue(by_id["010-a"], tasks_dir)
+    enqueue(by_id["020-b"], tasks_dir)
+    before = _ranks(tasks_dir)
+
+    locked = tasks_dir / "open" / "020-b.md"
+    locked.chmod(0o444)
+    try:
+        fresh = {t.task_id: t for t in load_tasks(tasks_dir)}["099-new"]
+        with pytest.raises(QueueError):
+            promote(fresh, tasks_dir)
+        assert _ranks(tasks_dir) == before  # nothing moved
+    finally:
+        locked.chmod(0o644)
+
+
+def test_a_concurrent_edit_is_refused_rather_than_clobbered(tmp_path: Path) -> None:
+    """The groom pass and `grind` edit these files while tv is open."""
+    from task_viewer import queue_ops
+
+    _task(tmp_path, "001-a")
+    tasks_dir = tmp_path / "tasks"
+    task = load_tasks(tasks_dir)[0]
+
+    real_read = queue_ops._read
+    calls = {"n": 0}
+
+    def racing_read(path: Path) -> str:
+        calls["n"] += 1
+        text = real_read(path)
+        if calls["n"] == 2:  # someone else writes between our read and our write
+            path.write_text(
+                text.replace("state: open", "state: ongoing\nclaimed_by: grind-7"),
+                encoding="utf-8",
+            )
+            return real_read(path)
+        return text
+
+    queue_ops._read = racing_read
+    try:
+        with pytest.raises(QueueError):
+            enqueue(task, tasks_dir)
+    finally:
+        queue_ops._read = real_read
+    assert "claimed_by: grind-7" in (tasks_dir / "open" / "001-a.md").read_text()
+
+
+def test_a_directory_task_takes_the_rank_the_loader_reads(tmp_path: Path) -> None:
+    """`analysis.md` sorts first alphabetically; the loader reads description.md."""
+    entry = tmp_path / "tasks" / "open" / "070-big-task"
+    entry.mkdir(parents=True)
+    (entry / "description.md").write_text(
+        "---\ntitle: Big\nstate: open\npriority: medium\nlabels: []\n---\n\n# Big\n",
+        encoding="utf-8",
+    )
+    (entry / "analysis.md").write_text(
+        "---\ntitle: Analysis fragment\n---\n\nNotes.\n", encoding="utf-8"
+    )
+    tasks_dir = tmp_path / "tasks"
+    enqueue(load_tasks(tasks_dir)[0], tasks_dir)
+
+    assert "next: 1" in (entry / "description.md").read_text(encoding="utf-8")
+    assert "next:" not in (entry / "analysis.md").read_text(encoding="utf-8")
+    assert _ranks(tasks_dir)["070-big-task"] == 1
+
+
+def test_a_closed_task_cannot_be_queued(tmp_path: Path) -> None:
+    """Closed tasks are out of the queue, so a rank there would read as nothing."""
+    closed = tmp_path / "tasks" / "closed"
+    closed.mkdir(parents=True)
+    (closed / "009-done.md").write_text(
+        "---\ntitle: Done\nstate: closed\npriority: low\nlabels: []\n---\n",
+        encoding="utf-8",
+    )
+    tasks_dir = tmp_path / "tasks"
+    task = load_tasks(tasks_dir)[0]
+
+    with pytest.raises(QueueError):
+        enqueue(task, tasks_dir)
+    assert "next:" not in (closed / "009-done.md").read_text(encoding="utf-8")
+
+
+def test_a_failed_write_leaves_the_original_intact(tmp_path: Path) -> None:
+    """Truncating in place would shred a task file on a full disk."""
+    from task_viewer import queue_ops
+
+    _task(tmp_path, "001-a")
+    tasks_dir = tmp_path / "tasks"
+    path = tasks_dir / "open" / "001-a.md"
+    original = path.read_text(encoding="utf-8")
+
+    def boom(src: str, dst: str) -> None:
+        raise OSError(28, "No space left on device")
+
+    real_replace = queue_ops.os.replace
+    queue_ops.os.replace = boom
+    try:
+        with pytest.raises(OSError):
+            enqueue(load_tasks(tasks_dir)[0], tasks_dir)
+    finally:
+        queue_ops.os.replace = real_replace
+
+    assert path.read_text(encoding="utf-8") == original
+    assert not list(path.parent.glob(".*.tmp"))  # no debris left behind
+
+
+def test_promote_tells_apart_two_tasks_sharing_an_id(tmp_path: Path) -> None:
+    """A half-finished move leaves the same id in open/ and ongoing/.
+
+    Identifying the queue by id would then hide the duplicate from the bump,
+    leaving two tasks tied at rank 1 and the order arbitrary.
+    """
+    tasks_dir = tmp_path / "tasks"
+    _task(tmp_path, "010-dup")  # open/, unranked — the one we promote
+    ongoing = tasks_dir / "ongoing"
+    ongoing.mkdir(parents=True)
+    (ongoing / "010-dup.md").write_text(
+        "---\ntitle: Dup\nstate: ongoing\npriority: medium\nlabels: []\nnext: 1\n---\n",
+        encoding="utf-8",
+    )
+
+    fresh = {(t.state, t.task_id): t for t in load_tasks(tasks_dir)}
+    promote(fresh[("open", "010-dup")], tasks_dir)
+
+    ranks = {(t.state, t.task_id): t.next_rank for t in load_tasks(tasks_dir)}
+    assert ranks[("open", "010-dup")] == 1
+    assert ranks[("ongoing", "010-dup")] == 2  # bumped, not left tied at 1
+
+
+def test_unparseable_frontmatter_is_reported_not_silently_accepted(
+    tmp_path: Path,
+) -> None:
+    """Tabs make YAML invalid, so the rank is written but never read back.
+
+    Without the check this reports success forever while nothing is queued.
+    """
+    path = tmp_path / "tasks" / "open" / "001-a.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\n\ttitle: A\n\tstate: open\n---\n\n# A\n", encoding="utf-8"
+    )
+    tasks_dir = tmp_path / "tasks"
+
+    with pytest.raises(QueueError, match="did not take effect"):
+        enqueue(load_tasks(tasks_dir)[0], tasks_dir)
