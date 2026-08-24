@@ -437,3 +437,68 @@ async def test_a_scan_landing_inside_a_project_leaves_the_task_list_alone(
         assert app._level == "tasks"
         labels = [str(label.render()) for label in app.query(Label)]
         assert not any("⎇" in text for text in labels)
+
+
+# --- keeping up with the remote ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_fast_forwards_the_highlighted_project(
+    worktree_workspace: Path, tmp_path: Path
+) -> None:
+    """Pressing `u` brings in the commits — and the tasks that rode with them."""
+    repo = worktree_workspace / "gimle-asgard"
+    origin = tmp_path / "origin"
+    _git(repo, "clone", "--quiet", "--bare", str(repo), str(origin))
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "fetch", "--quiet", "origin")
+    _git(repo, "branch", "--set-upstream-to=origin/main", "main")
+
+    # A task lands on the remote that this checkout has never seen.
+    scratch = tmp_path / "scratch"
+    _git(tmp_path, "clone", "--quiet", str(origin), str(scratch))
+    (scratch / "tasks" / "open" / "099-new-task.md").write_text("# Newly filed\n")
+    _git(scratch, "add", "-A")
+    _git(scratch, "commit", "-m", "File a new task")
+    _git(scratch, "push", "--quiet", "origin", "main")
+    _git(repo, "fetch", "--quiet", "origin")
+
+    app = TaskViewerApp(find_projects(worktree_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        app.query_one(TaskListView).index = 0
+        await pilot.pause()
+        assert not (repo / "tasks" / "open" / "099-new-task.md").exists()
+
+        await pilot.press("u")
+        await pilot.pause()
+        assert (repo / "tasks" / "open" / "099-new-task.md").exists()
+        await app.workers.wait_for_complete()
+
+
+@pytest.mark.asyncio
+async def test_update_is_hidden_inside_a_project(worktree_workspace: Path) -> None:
+    app = TaskViewerApp(find_projects(worktree_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        assert app.check_action("update", ()) is True
+        assert app.check_action("fetch", ()) is True
+        await pilot.press("right")
+        await pilot.pause()
+        assert app.check_action("update", ()) is None
+        assert app.check_action("fetch", ()) is None
+        await app.workers.wait_for_complete()
+
+
+@pytest.mark.asyncio
+async def test_update_of_a_project_with_no_remote_changes_nothing(
+    worktree_workspace: Path,
+) -> None:
+    app = TaskViewerApp(find_projects(worktree_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        app.query_one(TaskListView).index = 0
+        await pilot.pause()
+        before = [str(label.render()) for label in app.query(Label)]
+        await pilot.press("u")
+        await pilot.pause()
+        assert [str(label.render()) for label in app.query(Label)] == before

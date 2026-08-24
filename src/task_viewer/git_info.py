@@ -16,12 +16,12 @@ from pathlib import Path
 
 # Base branches tried in order, as (display name, fully qualified ref). Fully
 # qualified because git resolves a *tag* named `main` ahead of the branch, which
-# would silently skew every count.
+# would silently skew every count. Only local branches: "how far from main" and
+# "in step with the remote" are different questions, and the upstream fields
+# below answer the second one without overloading these counts.
 _BASE_CANDIDATES = (
     ("main", "refs/heads/main"),
-    ("origin/main", "refs/remotes/origin/main"),
     ("master", "refs/heads/master"),
-    ("origin/master", "refs/remotes/origin/master"),
 )
 
 # Reflog messages that mark a checkout genuinely coming into being. Branch
@@ -38,6 +38,8 @@ _MAX_SUBJECTS = 5
 _TIMEOUT = 5.0
 
 _REFLOG_STAMP_RE = re.compile(r"@\{(\d+)\}")
+_AHEAD_RE = re.compile(r"ahead (\d+)")
+_BEHIND_RE = re.compile(r"behind (\d+)")
 
 
 @dataclass
@@ -54,6 +56,21 @@ class GitInfo:
     behind: int = 0
     subjects: list[str] = field(default_factory=list)
     dirty: int = 0
+    upstream: str | None = None
+    unpushed: int = 0
+    unpulled: int = 0
+    upstream_gone: bool = False
+    has_remote: bool = False
+    fetched: datetime | None = None
+
+    @property
+    def in_step(self) -> bool:
+        """True when this branch matches its upstream *as last fetched*.
+
+        Never means "matches the remote right now" — only a fetch can know
+        that, which is why :attr:`fetched` travels alongside.
+        """
+        return self.upstream is not None and not (self.unpushed or self.unpulled)
 
     @property
     def kind(self) -> str:
@@ -98,7 +115,65 @@ def load_git_info(root: Path) -> GitInfo | None:
         behind=behind,
         subjects=_subjects(root, base_ref) if base_ref and ahead else [],
         dirty=len(dirty_paths),
+        **_remote_state(root, None if detached else branch, git_dir),
     )
+
+
+def _remote_state(root: Path, branch: str | None, git_dir: str) -> dict:
+    """Where this branch stands against its upstream, as last fetched."""
+    tracking = _upstream(root, branch) if branch else None
+    if tracking is None:
+        # No upstream: worth saying so only if there is a remote to push to.
+        return {"has_remote": bool(_git(root, "remote")), "fetched": _last_fetch(git_dir)}
+    name, unpulled, unpushed, gone = tracking
+    return {
+        "upstream": name,
+        "unpushed": unpushed,
+        "unpulled": unpulled,
+        "upstream_gone": gone,
+        "has_remote": True,
+        "fetched": _last_fetch(git_dir),
+    }
+
+
+def _upstream(root: Path, branch: str) -> tuple[str, int, int, bool] | None:
+    """``(name, unpulled, unpushed, gone)`` for the branch's upstream.
+
+    One ``for-each-ref`` carries both the name and the counts: ``%(upstream:track)``
+    renders as ``[ahead 2, behind 1]``, or ``[gone]`` when the remote branch has
+    been deleted — which is what a merged-and-tidied feature branch looks like.
+    """
+    out = _git(
+        root,
+        "for-each-ref",
+        "--format=%(upstream:short)%09%(upstream:track)",
+        f"refs/heads/{branch}",
+    )
+    if not out:
+        return None
+    name, _, track = out.partition("\t")
+    if not name:
+        return None
+    ahead = _AHEAD_RE.search(track)
+    behind = _BEHIND_RE.search(track)
+    return (
+        name,
+        int(behind.group(1)) if behind else 0,
+        int(ahead.group(1)) if ahead else 0,
+        track.strip() == "[gone]",
+    )
+
+
+def _last_fetch(git_dir: str) -> datetime | None:
+    """When this repository last heard from its remote.
+
+    ``FETCH_HEAD`` lives in the common git dir, so every worktree of a repo
+    reports the same — correct, since they share one object store.
+    """
+    if not git_dir:
+        return None
+    common = git_dir.partition("/worktrees/")[0]
+    return _mtime(Path(common) / "FETCH_HEAD")
 
 
 def _created(root: Path, branch: str | None, is_worktree: bool) -> datetime | None:
@@ -313,14 +388,25 @@ def describe_age(moment: datetime | None, now: datetime | None = None) -> str:
     return f"{days // 30}mo"
 
 
+def describe_age_phrase(moment: datetime | None, now: datetime | None = None) -> str:
+    """Relative age as a sentence fragment: ``3d ago``, ``just now``.
+
+    Separate from :func:`describe_age` because the row wants a bare unit and a
+    sentence wants the preposition — and ``"now ago"`` is not a phrase.
+    """
+    minutes = _minutes_since(moment, now)
+    if minutes is None:
+        return "unknown"
+    if minutes < 0:
+        return "in the future"
+    if minutes < 1:
+        return "just now"
+    return f"{describe_age(moment, now)} ago"
+
+
 def format_moment(moment: datetime | None, now: datetime | None = None) -> str:
     """Absolute local timestamp with a readable relative age, for the pane."""
-    minutes = _minutes_since(moment, now)
-    if moment is None or minutes is None:
+    if moment is None:
         return "unknown"
     stamp = moment.strftime("%Y-%m-%d %H:%M")
-    if minutes < 0:
-        return f"{stamp} (in the future)"
-    if minutes < 1:
-        return f"{stamp} (just now)"
-    return f"{stamp} ({describe_age(moment, now)} ago)"
+    return f"{stamp} ({describe_age_phrase(moment, now)})"
