@@ -7,11 +7,13 @@ over the ``git`` CLI, so faking the CLI would only test the fake.
 from __future__ import annotations
 
 import os
-import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from helpers import commit as _commit
+from helpers import git as _git
+from helpers import init_repo
 
 from task_viewer.git_info import (
     _MAX_SUBJECTS,
@@ -21,37 +23,10 @@ from task_viewer.git_info import (
 )
 
 
-def _git(cwd: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True
-    )
-
-
-def _commit(cwd: Path, name: str, message: str) -> None:
-    (cwd / name).write_text(f"{name}\n", encoding="utf-8")
-    _git(cwd, "add", name)
-    _git(cwd, "commit", "-m", message)
-
-
-@pytest.fixture(autouse=True)
-def isolated_git(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the developer's real git config out of the test repositories."""
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
-    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
-    monkeypatch.setenv("GIT_AUTHOR_NAME", "tv test")
-    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "tv@example.com")
-    monkeypatch.setenv("GIT_COMMITTER_NAME", "tv test")
-    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "tv@example.com")
-
-
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     """A repo on ``main`` with one commit."""
-    root = tmp_path / "gimle-example"
-    root.mkdir()
-    _git(root, "init", "-b", "main")
-    _commit(root, "README.md", "Initial commit")
-    return root
+    return init_repo(tmp_path / "gimle-example")
 
 
 def test_returns_none_for_a_plain_directory(tmp_path: Path) -> None:
@@ -105,8 +80,11 @@ def test_uncommitted_work_is_counted_and_dates_the_checkout(repo: Path) -> None:
     # and a quoted name no longer names a file we can stat.
     scratch = repo / "næste plan.md"
     scratch.write_text("new\n", encoding="utf-8")
-    touched = datetime.now(timezone.utc).astimezone() + timedelta(days=1)
-    os.utime(scratch, (touched.timestamp(), touched.timestamp()))
+    # A whole second, so a filesystem with coarse mtime granularity still
+    # stores it exactly and the comparison below can be exact.
+    stamp = int((datetime.now(timezone.utc) + timedelta(days=1)).timestamp())
+    os.utime(scratch, (stamp, stamp))
+    touched = datetime.fromtimestamp(stamp, tz=timezone.utc).astimezone()
 
     info = load_git_info(repo)
     assert info is not None
@@ -114,7 +92,7 @@ def test_uncommitted_work_is_counted_and_dates_the_checkout(repo: Path) -> None:
     # The newest edit dates the checkout, ahead of the last commit.
     assert info.updated is not None
     assert info.updated > _last_commit_time(repo)
-    assert abs((info.updated - touched).total_seconds()) < 1
+    assert info.updated == touched
 
 
 def test_a_staged_rename_counts_once(repo: Path) -> None:
@@ -176,13 +154,11 @@ def test_describe_age_of_nothing() -> None:
 
 
 def _last_commit_time(root: Path) -> datetime:
-    stamp = subprocess.run(
-        ["git", "-C", str(root), "log", "-1", "--format=%cI"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    return datetime.fromisoformat(stamp)
+    from task_viewer.git_info import _last_commit
+
+    stamp = _last_commit(root)
+    assert stamp is not None
+    return stamp
 
 
 def test_merged_worktree_is_recognised(repo: Path) -> None:
@@ -331,3 +307,52 @@ def test_format_moment_reads_as_a_sentence(delta: timedelta, expected: str) -> N
 
 def test_format_moment_of_nothing() -> None:
     assert format_moment(None) == "unknown"
+
+
+def test_base_falls_back_to_origin_main_while_on_main(repo: Path) -> None:
+    """The whole reason the candidate list has remote entries: unpushed work."""
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _commit(repo, "one.py", "First unpushed commit")
+    _commit(repo, "two.py", "Second unpushed commit")
+
+    info = load_git_info(repo)
+    assert info is not None
+    assert info.base == "origin/main"
+    assert info.ahead == 2
+    assert info.merged is False
+
+
+def test_a_vanished_dirty_path_is_ignored(repo: Path) -> None:
+    """A dangling symlink is reported by status but cannot be stat'ed."""
+    (repo / "dangling").symlink_to(repo / "gone.txt")
+
+    info = load_git_info(repo)
+    assert info is not None
+    assert info.dirty == 1
+    assert info.updated is not None  # the commit still dates it
+
+
+def test_returns_none_when_git_is_unavailable(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "/nonexistent")
+    assert load_git_info(repo) is None
+
+
+@pytest.mark.parametrize(
+    ("delta", "expected"),
+    [
+        (timedelta(minutes=59), "59m"),
+        (timedelta(minutes=60), "1h"),
+        (timedelta(hours=23), "23h"),
+        (timedelta(hours=24), "1d"),
+        (timedelta(days=13), "13d"),
+        (timedelta(days=14), "2w"),
+        (timedelta(days=89), "12w"),
+        (timedelta(days=90), "3mo"),
+    ],
+)
+def test_describe_age_bucket_boundaries(delta: timedelta, expected: str) -> None:
+    """Choosing the bucket is the whole job, so pin both sides of each edge."""
+    now = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
+    assert describe_age(now - delta, now=now) == expected

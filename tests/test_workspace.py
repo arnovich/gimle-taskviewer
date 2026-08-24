@@ -2,19 +2,14 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
 
-from task_viewer.app import (
-    TaskListView,
-    TaskViewerApp,
-    _format_project_row,
-    _git_section,
-)
+from task_viewer.app import TaskListView, TaskViewerApp, _format_project_row
+from helpers import git as _git
+from textual.widgets import Label, Markdown
 from task_viewer.git_info import load_git_info
-from textual.widgets import Label
 from task_viewer.workspace import find_projects
 
 
@@ -78,25 +73,9 @@ async def test_task_keys_hidden_while_browsing_projects(workspace: Path) -> None
         assert app.check_action("back", ()) is True
 
 
-def _git(cwd: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True
-    )
-
-
 @pytest.fixture
-def worktree_workspace(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def worktree_workspace(workspace: Path) -> Path:
     """A workspace where one project is a worktree of another, one commit ahead."""
-    for name, value in (
-        ("GIT_CONFIG_GLOBAL", "/dev/null"),
-        ("GIT_CONFIG_SYSTEM", "/dev/null"),
-        ("GIT_AUTHOR_NAME", "tv test"),
-        ("GIT_AUTHOR_EMAIL", "tv@example.com"),
-        ("GIT_COMMITTER_NAME", "tv test"),
-        ("GIT_COMMITTER_EMAIL", "tv@example.com"),
-    ):
-        monkeypatch.setenv(name, value)
-
     repo = workspace / "gimle-asgard"
     _git(repo, "init", "-b", "main")
     _git(repo, "add", "-A")
@@ -110,7 +89,7 @@ def worktree_workspace(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     return workspace
 
 
-def test_project_row_shows_branch_drift_and_age(worktree_workspace: Path) -> None:
+def test_project_row_shows_branch_and_drift(worktree_workspace: Path) -> None:
     project = next(
         p for p in find_projects(worktree_workspace) if p.name.endswith("-feature")
     )
@@ -120,23 +99,9 @@ def test_project_row_shows_branch_drift_and_age(worktree_workspace: Path) -> Non
     assert "↑1" in branch_line
 
 
-def test_summary_section_answers_created_updated_and_drift(
-    worktree_workspace: Path,
-) -> None:
-    worktree = worktree_workspace / "gimle-asgard-feature"
-    section = "\n".join(_git_section(load_git_info(worktree)))
-    assert "## Worktree" in section
-    assert "worktree of `gimle-asgard`" in section
-    assert "**Created**" in section
-    assert "**Updated**" in section
-    assert "1 ahead" in section
-    assert "- Add the feature" in section
-
-
-def test_no_git_section_for_a_plain_project(workspace: Path) -> None:
+def test_a_project_without_git_gets_a_single_line_row(workspace: Path) -> None:
     project = find_projects(workspace)[0]
-    assert _git_section(load_git_info(project.path)) == []
-    assert "\n" not in _format_project_row(project, None)
+    assert _format_project_row(project, None) == "gimle-asgard  [dim]2 active[/]"
 
 
 @pytest.mark.asyncio
@@ -148,9 +113,8 @@ async def test_workspace_subtitle_counts_worktrees(worktree_workspace: Path) -> 
         assert "worktree" not in app.sub_title
         await app.workers.wait_for_complete()
         await pilot.pause()
-        # ...and the rows are repainted once it lands.
+        # ...and the subtitle is rewritten once it lands.
         assert "1 worktree" in app.sub_title
-        assert app._git_info[worktree_workspace / "gimle-asgard-feature"] is not None
 
 
 @pytest.mark.asyncio
@@ -164,3 +128,37 @@ async def test_project_rows_are_repainted_after_the_scan(
         await pilot.pause()
         labels = [str(label.render()) for label in app.query(Label)]
         assert any("feat/thing" in text for text in labels)
+
+
+@pytest.mark.asyncio
+async def test_summary_pane_renders_the_git_section(worktree_workspace: Path) -> None:
+    """The feature has to reach the pane, not just be computable."""
+    projects = find_projects(worktree_workspace)
+    index = next(i for i, p in enumerate(projects) if p.name.endswith("-feature"))
+    app = TaskViewerApp(projects, "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        app.query_one(TaskListView).index = index
+        await pilot.pause()
+
+        source = app.query_one(Markdown).source
+        assert "## Worktree" in source
+        assert "feat/thing" in source
+        assert "worktree of `gimle-asgard`" in source
+        assert "**Created** 20" in source  # a real timestamp, not "unknown"
+        assert "- Add the feature" in source
+        # The tasks are still there, and the hint sits below everything.
+        assert "## Active tasks" in source
+        assert source.rstrip().endswith("*Press `→` or `Enter` to open.*")
+
+
+@pytest.mark.asyncio
+async def test_summary_pane_has_no_git_section_without_git(workspace: Path) -> None:
+    projects = find_projects(workspace)
+    app = TaskViewerApp(projects, "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        source = app.query_one(Markdown).source
+        assert "## Worktree" not in source
+        assert "## Repository" not in source
