@@ -14,6 +14,7 @@ from task_viewer.app import (
     _git_section,
 )
 from task_viewer.git_info import load_git_info
+from textual.widgets import Label
 from task_viewer.workspace import find_projects
 
 
@@ -142,6 +143,24 @@ def test_no_git_section_for_a_plain_project(workspace: Path) -> None:
 async def test_workspace_subtitle_counts_worktrees(worktree_workspace: Path) -> None:
     projects = find_projects(worktree_workspace)
     app = TaskViewerApp(projects, "gimle", workspace=True)
-    async with app.run_test():
+    async with app.run_test() as pilot:
+        # The git scan runs in a worker so the list paints immediately...
+        assert "worktree" not in app.sub_title
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        # ...and the rows are repainted once it lands.
         assert "1 worktree" in app.sub_title
         assert app._git_info[worktree_workspace / "gimle-asgard-feature"] is not None
+
+
+@pytest.mark.asyncio
+async def test_project_rows_are_repainted_after_the_scan(
+    worktree_workspace: Path,
+) -> None:
+    projects = find_projects(worktree_workspace)
+    app = TaskViewerApp(projects, "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        labels = [str(label.render()) for label in app.query(Label)]
+        assert any("feat/thing" in text for text in labels)

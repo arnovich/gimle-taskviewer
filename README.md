@@ -74,22 +74,32 @@ those child projects instead, with their active-task counts and — for anything
 that is a git checkout — its branch, drift and freshness:
 
 ```
-projects · gimle — 16 projects · 9 worktrees · → to open
-──────────────────────────────────────────────────────
-  gimle-mimir  37 active
-    ⎇ main ✎2 9m
+projects · gimle — 17 projects · 10 worktrees · → to open
+────────────────────────────────────────────────────────
+  gimle-asgard  13 active
+    ⎇ main ✎5 8m
+  gimle-asgard-proof_kernel  20 active
+    ⎇ feat/strict_rewrite… ✔merged 3h
   gimle-mimir-task-140  19 active
-    ⎇ task/140-derivative-aug… ↑2 ↓221 3w
+    ⎇ task/140-derivative… ↑2 ↓221 3w
 ```
 
 * `⎇ branch` — the checked-out branch (truncated to fit)
+* `✔merged` — **the base branch already holds every commit here**; the worktree
+  has served its purpose and can be removed
 * `↑n` / `↓n` — commits ahead of / behind the base branch
 * `✎n` — uncommitted changes in the working tree
-* trailing `9m` / `3w` — how long ago the checkout was last touched
+* trailing `8m` / `3w` — how long ago the checkout was last touched
+
+A row says nothing about drift when there is nothing to say: a plain clone
+sitting in sync with its remote just shows its branch and age.
 
 Press `→` (or `Enter`) to step into a project and see its task list; press `←`
 to step back out to the project list. Everything else works the same once
 you're inside a project.
+
+The git scan runs in a background thread, so the list paints immediately and
+fills in its branch lines a moment later.
 
 ## Keeping track of worktrees
 
@@ -112,13 +122,30 @@ picture in the right pane:
 - Add derivative/phase-space augmented encoder input features (task 140)
 ```
 
-* **Created** — for a worktree, when `git worktree add` made it; for a plain
-  clone, the oldest surviving reflog entry for the current branch.
-* **Updated** — the most recent of the last commit and any uncommitted edit,
-  so a worktree with live but uncommitted work doesn't read as stale.
-* **Base** — drift against the first of `main`, `master`, `origin/main`,
+* **Created** — when `git worktree add` made this worktree. A plain clone has no
+  such marker, so it reports **Branch since** instead: when the current branch
+  started, per the reflog. If the reflog has been trimmed by `gc.reflogExpire`
+  its oldest entry is just an old `pull`, not a birth — that reports `unknown`
+  rather than a confidently wrong date.
+* **Updated** — the most recent of the last commit and any uncommitted edit, so
+  a worktree with live but uncommitted work doesn't read as stale.
+* **Base** — drift against the first of `main`, `origin/main`, `master`,
   `origin/master` that exists and isn't the branch you're standing on. Sitting
   on `main` therefore compares against `origin/main`, showing unpushed work.
+  Fully-qualified refs are used, so a *tag* named `main` can't skew the counts.
+
+When a worktree is fully merged the pane says so instead of listing drift — and
+if it still holds uncommitted files, it warns, because those exist nowhere else
+and removing the worktree would lose them:
+
+```
+- **Merged** fully into `main` — nothing of its own left
+
+> ⚠ Merged, but 10 files here are uncommitted — they exist nowhere else.
+```
+
+A detached HEAD (mid-rebase, mid-bisect, on a tag) is shown as
+`detached at abc1234` rather than hidden.
 
 Only child folders that have a tasks folder are listed, so a worktree without
 one won't appear.
