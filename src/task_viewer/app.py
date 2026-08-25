@@ -39,6 +39,7 @@ from .git_info import (
 from .groom import GroomResult, run_groom
 from .pull_requests import (
     ActionResult,
+    open_in_browser,
     PullRequest,
     checks_summary,
     comment as post_comment,
@@ -211,6 +212,7 @@ class TaskViewerApp(App):
         Binding("f", "fetch", "Fetch", show=True),
         Binding("M", "merge_pr", "Merge PR", show=True),
         Binding("m", "comment_pr", "Comment", show=True),
+        Binding("w", "open_pr", "Open in browser", show=True),
         Binding("u", "update", "Update", show=True),
         Binding("c", "work_on_task", "Work (Claude)", show=True),
         Binding("R", "groom", "Review all", show=True),
@@ -302,7 +304,7 @@ class TaskViewerApp(App):
             return True if self._level == "projects" else None
         if action == "back":
             return True if self._level == "tasks" and self._workspace else None
-        if action in ("merge_pr", "comment_pr"):
+        if action in ("merge_pr", "comment_pr", "open_pr"):
             # Only offered where there is actually a PR to act on.
             row = self._current_row()
             return True if row and row.project.path in self._pulls else None
@@ -420,6 +422,27 @@ class TaskViewerApp(App):
         self.call_from_thread(
             self._on_pr_action, merge_pull_request(repo.path, pull.number), True
         )
+
+    def action_open_pr(self) -> None:
+        """Open the highlighted worktree's pull request in a browser."""
+        row = self._current_row()
+        pull = self._pulls.get(row.project.path) if row else None
+        if pull is None:
+            return
+        self._open_url(pull.url)
+
+    def _open_url(self, url: str) -> None:
+        result = open_in_browser(url)
+        self.notify(
+            result.message,
+            severity="information" if result.ok else "warning",
+            timeout=8 if result.ok else 12,
+        )
+
+    def on_markdown_link_clicked(self, event: Markdown.LinkClicked) -> None:
+        """Make the link in the pane a link, rather than text to select."""
+        event.prevent_default()
+        self._open_url(event.href)
 
     def action_comment_pr(self) -> None:
         """Write a comment in $EDITOR and post it to the pull request."""

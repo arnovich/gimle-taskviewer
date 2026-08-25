@@ -14,7 +14,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +45,13 @@ _running: set[subprocess.Popen] = set()
 _running_lock = threading.Lock()
 
 _TIMEOUT = 30.0
+
+# Tried in order; the first one present wins.
+_OPENERS = {
+    "linux": ("xdg-open", "gio", "wslview"),
+    "darwin": ("open",),
+    "win32": ("start",),
+}
 
 # owner/name, and nothing else. Anything with a leading dash or an extra path
 # segment is not a repository we should be aiming a merge at.
@@ -271,6 +280,41 @@ def comment(repo_root: Path, number: int, body: str) -> ActionResult:
     if result.returncode != 0:
         return ActionResult(False, _first_line(result.stderr) or "gh refused the comment")
     return ActionResult(True, f"commented on #{number}")
+
+
+def open_in_browser(url: str) -> ActionResult:
+    """Hand ``url`` to the desktop's URL opener.
+
+    Detached and with its streams closed: a console browser inheriting the
+    TUI's terminal would take it over, and a GUI one writing to stderr would
+    scribble over the interface.
+    """
+    if not url.lower().startswith(("http://", "https://")):
+        # The URL arrives from an API response, so check it is plainly a web
+        # page before handing it to whatever the desktop has registered.
+        return ActionResult(False, "not a web address — nothing opened")
+    opener = _opener()
+    if not opener:
+        return ActionResult(False, f"no way to open a browser here — {url}")
+    try:
+        subprocess.Popen(
+            [opener, url],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, ValueError) as error:
+        return ActionResult(False, f"could not open a browser: {error}")
+    return ActionResult(True, f"opened {url}")
+
+
+def _opener() -> str:
+    """The command this platform uses to open a URL, if it has one."""
+    for candidate in _OPENERS.get(sys.platform, _OPENERS["linux"]):
+        if shutil.which(candidate):
+            return candidate
+    return ""
 
 
 def _first_line(text: str) -> str:
