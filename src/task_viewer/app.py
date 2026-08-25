@@ -10,19 +10,23 @@ Two navigation levels:
 
 from __future__ import annotations
 
+import os
+import shlex
 import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 
 from rich.markup import escape
 from textual import work
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.containers import VerticalScroll
-from textual.widgets import Footer, Header, Label, ListItem, ListView, Markdown
+from textual.screen import ModalScreen
+from textual.widgets import Button, Footer, Header, Label, ListItem, ListView, Markdown
 
 from .discovery import STATES, Task, count_states, load_tasks
 from .git_info import (
@@ -33,6 +37,14 @@ from .git_info import (
     load_git_info,
 )
 from .groom import GroomResult, run_groom
+from .pull_requests import (
+    ActionResult,
+    PullRequest,
+    checks_summary,
+    comment as post_comment,
+    load_pull_requests,
+    merge as merge_pull_request,
+)
 from .queue_ops import QueueError, clear_next, enqueue, promote
 from .remote import UpdateResult, cancel_all, fast_forward, fetch
 from .state_ops import StateChangeError, set_state
@@ -73,6 +85,11 @@ _EMPTY_BODY = "*Select a task on the left. Press `Tab` to move between panes.*"
 _ROW_BRANCH_WIDTH = 20
 _WORKTREE_NAME_WIDTH = 18
 
+# Fences off the editor template. An HTML comment, not `#` lines: this is a
+# Markdown box, where `## Blocking` is a heading and `#538` is a pull request,
+# and stripping those silently eats the review.
+_COMMENT_FENCE = "<!-- tv:"
+
 
 @dataclass
 class _Row:
@@ -91,6 +108,53 @@ class MarkdownPane(VerticalScroll):
     """Right pane. Focusable so `Tab` reaches it and arrows scroll it."""
 
     can_focus = True
+
+
+class ConfirmMerge(ModalScreen[str]):
+    """Merging is outward-facing and hard to undo, so it is never one keypress."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss_merge", "Cancel"),
+        Binding("n", "dismiss_merge", "Cancel", show=False),
+        Binding("q", "dismiss_merge", "Cancel", show=False),
+        Binding("y", "confirm('merge')", "Merge"),
+    ]
+
+    def __init__(self, repo: str, pull: PullRequest) -> None:
+        super().__init__()
+        self._repo = repo
+        self._pull = pull
+
+    def compose(self) -> ComposeResult:
+        pull = self._pull
+        lines = [
+            f"Merge #{pull.number} into {_literal(self._repo)}?",
+            "",
+            # A PR title is arbitrary text: unescaped, "[WIP] …" silently
+            # vanishes and "[/]" takes the app down.
+            f"  {_literal(_shorten(pull.title, 52))}",
+            f"  {_literal(pull.diffstat)} · {_literal(checks_summary(pull))}",
+        ]
+        for warning in pull.warnings:
+            lines.append(f"  [yellow]⚠ {_literal(warning)}[/]")
+        # The comments are why you would change your mind, so they go above
+        # the keys rather than four screens down the other pane.
+        recent = pull.human_comments
+        if recent:
+            latest = recent[-1].body.strip().splitlines()[0] if recent[-1].body.strip() else ""
+            lines += [
+                f"  [bold]{_plural(len(recent), 'comment')}[/], latest:",
+                f"  [bold]“{_literal(_shorten(latest, 46))}”[/]",
+            ]
+        lines += ["", "y  merge      esc  cancel"]
+        with VerticalScroll(id="confirm"):
+            yield Label("\n".join(lines))
+
+    def action_confirm(self, choice: str) -> None:
+        self.dismiss(choice)
+
+    def action_dismiss_merge(self) -> None:
+        self.dismiss(None)
 
 
 class TaskViewerApp(App):
@@ -121,6 +185,19 @@ class TaskViewerApp(App):
     ListItem {
         padding: 0 1;
     }
+
+    ConfirmMerge {
+        align: center middle;
+    }
+
+    ConfirmMerge #confirm {
+        width: 64;
+        height: auto;
+        max-height: 80%;
+        border: round $warning;
+        background: $surface;
+        padding: 1 2;
+    }
     """
 
     BINDINGS = [
@@ -132,6 +209,8 @@ class TaskViewerApp(App):
         Binding("h", "back", "Projects", show=False),
         Binding("space", "toggle_group", "Fold", show=True),
         Binding("f", "fetch", "Fetch", show=True),
+        Binding("M", "merge_pr", "Merge PR", show=True),
+        Binding("m", "comment_pr", "Comment", show=True),
         Binding("u", "update", "Update", show=True),
         Binding("c", "work_on_task", "Work (Claude)", show=True),
         Binding("R", "groom", "Review all", show=True),
@@ -180,6 +259,9 @@ class TaskViewerApp(App):
         self._fetching = False
         self._unreachable: set[Path] = set()
         self._updating = False
+        self._pulls: dict[Path, PullRequest] = {}
+        self._pr_errors: set[Path] = set()
+        self._merging = False
 
     @classmethod
     def single(
@@ -220,6 +302,10 @@ class TaskViewerApp(App):
             return True if self._level == "projects" else None
         if action == "back":
             return True if self._level == "tasks" and self._workspace else None
+        if action in ("merge_pr", "comment_pr"):
+            # Only offered where there is actually a PR to act on.
+            row = self._current_row()
+            return True if row and row.project.path in self._pulls else None
         if action in ("fetch", "update"):
             return True if self._level == "projects" else None
         if action == "toggle_group":
@@ -258,6 +344,11 @@ class TaskViewerApp(App):
         self._update_projects_subtitle()
         self._load_git_info(refresh=True)
 
+    def _on_pulls(self, scanned: tuple[dict[Path, PullRequest], set[Path]]) -> None:
+        self._pulls, self._pr_errors = scanned
+        if self._level == "projects" and self.is_running:
+            self._build_project_rows()
+
     def _on_fetch_finished(self, unreachable: set[Path]) -> None:
         self._fetching = False
         self._unreachable = unreachable
@@ -295,6 +386,125 @@ class TaskViewerApp(App):
         )
         # The tasks travelled with the commits, so the list is stale too.
         self._load_git_info()
+
+    def action_merge_pr(self) -> None:
+        """Merge the highlighted worktree's pull request, after confirming."""
+        row = self._current_row()
+        pull = self._pulls.get(row.project.path) if row else None
+        if row is None or pull is None or self._merging:
+            return
+        blocking = pull.blocking
+        if blocking:
+            # Not a warning: GitHub will refuse, and so would --admin.
+            self.notify(
+                f"#{pull.number} cannot be merged — {blocking}",
+                severity="warning",
+                timeout=8,
+            )
+            return
+        self.push_screen(
+            ConfirmMerge(row.group.project.name, pull),
+            lambda choice: self._start_merge(row, pull, choice),
+        )
+
+    def _start_merge(self, row: _Row, pull: PullRequest, choice: str | None) -> None:
+        if choice != "merge" or self._merging:
+            return
+        self._merging = True
+        self.notify(f"merging #{pull.number}…", timeout=3)
+        self._run_merge(row.group.project, pull)
+
+    @work(thread=True, group="pr", exclusive=True, exit_on_error=False)
+    def _run_merge(self, repo: Project, pull: PullRequest) -> None:
+        """Off the event loop: a merge is two network round trips."""
+        self.call_from_thread(
+            self._on_pr_action, merge_pull_request(repo.path, pull.number), True
+        )
+
+    def action_comment_pr(self) -> None:
+        """Write a comment in $EDITOR and post it to the pull request."""
+        row = self._current_row()
+        pull = self._pulls.get(row.project.path) if row else None
+        if row is None or pull is None or self._merging:
+            return
+        try:
+            draft = self._compose(pull)
+        except Exception as error:  # noqa: BLE001 - never take the TUI down
+            self.notify(f"could not open an editor: {error}", severity="error", timeout=8)
+            return
+        if draft is None:
+            self.notify(
+                "no comment written — if your $EDITOR detaches (code, subl), "
+                "give it a blocking form such as `code --wait`",
+                timeout=8,
+            )
+            return
+        body, draft_path = draft
+        self._merging = True
+        self._run_comment(row.group.project, pull, body, draft_path)
+
+    @work(thread=True, group="pr", exclusive=True, exit_on_error=False)
+    def _run_comment(
+        self, repo: Project, pull: PullRequest, body: str, draft_path: Path
+    ) -> None:
+        result = post_comment(repo.path, pull.number, body)
+        if result.ok:
+            draft_path.unlink(missing_ok=True)
+        else:
+            # Never destroy what the user wrote; tell them where it is.
+            result = ActionResult(result.ok, f"{result.message} — draft kept at {draft_path}")
+        self.call_from_thread(self._on_pr_action, result, True)
+
+    def _on_pr_action(self, result: ActionResult, refresh: bool) -> None:
+        self._merging = False
+        self.notify(
+            result.message,
+            severity="information" if result.ok else "warning",
+            timeout=10,
+        )
+        if refresh and self.is_running:
+            # Re-scan either way: a timeout does not mean the call failed.
+            self._load_git_info(refresh=True)
+
+    def _compose(self, pull: PullRequest) -> tuple[str, Path] | None:
+        """Suspend the TUI, let $EDITOR take the comment, return it and its file.
+
+        The template is fenced off with an HTML comment rather than ``#`` lines:
+        this is a Markdown box, where ``## Blocking`` is a heading and ``#538``
+        is a pull request, and stripping them silently eats the review.
+        """
+        template = (
+            f"\n\n{_COMMENT_FENCE}\n"
+            f"Comment on #{pull.number}: {pull.title}\n"
+            "Everything from the marker down is ignored. An empty message aborts.\n"
+            "-->\n"
+        )
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+        handle = tempfile.NamedTemporaryFile(
+            "w", suffix=".md", prefix="tv-comment-", delete=False, encoding="utf-8"
+        )
+        with handle:
+            handle.write(template)
+        path = Path(handle.name)
+
+        try:
+            with self.suspend():
+                finished = _run_editor(editor, path)
+        except SuspendNotSupported:
+            # Headless, or a host with no terminal to step out of: there is no
+            # full-screen UI in the way, so just run it.
+            finished = _run_editor(editor, path)
+        if finished is None or finished.returncode != 0:
+            # `vim :cq` is the conventional "abort this" and must be honoured.
+            path.unlink(missing_ok=True)
+            return None
+
+        written = path.read_text(encoding="utf-8", errors="replace")
+        body = written.split(_COMMENT_FENCE, 1)[0].strip()
+        if not body or written == template:
+            path.unlink(missing_ok=True)
+            return None
+        return body, path
 
     def _current_path(self) -> Path | None:
         row = self._current_row()
@@ -424,24 +634,30 @@ class TaskViewerApp(App):
 
     def _row_label(self, row: _Row) -> str:
         info = self._git_info.get(row.project.path)
+        pull = self._pulls.get(row.project.path)
         if row.is_worktree:
-            return _format_worktree_row(row.project, row.group.project, info)
+            return _format_worktree_row(row.project, row.group.project, info, pull)
         if not row.group.worktrees:
-            return _format_project_row(row.project, info)
+            return _format_project_row(row.project, info, pull=pull)
         expanded = row.group.project.path in self._expanded
         note = ""
         if not expanded:
             note = _format_folded_note(
-                [self._git_info.get(w.path) for w in row.group.worktrees]
+                [self._git_info.get(w.path) for w in row.group.worktrees],
+                [self._pulls.get(w.path) for w in row.group.worktrees],
             )
         marker = "[dim]▾[/] " if expanded else "[dim]▸[/] "
-        return _format_project_row(row.project, info, marker, note)
+        return _format_project_row(row.project, info, marker, note, pull)
 
     def _update_projects_subtitle(self) -> None:
         worktrees = sum(len(group.worktrees) for group in self._groups)
         summary = _plural(len(self._groups), "repo" if worktrees else "project")
         if worktrees:
             summary += f" · {_plural(worktrees, 'worktree')}"
+        if self._pulls:
+            summary += f" · {_plural(len(self._pulls), 'PR')}"
+        if self._pr_errors:
+            summary += "  ⚠ gh unavailable"
         if self._fetching:
             summary += "  ⟳ fetching…"
         self.sub_title = f"{summary} · → to open"
@@ -463,6 +679,12 @@ class TaskViewerApp(App):
         repos = [group.project for group in self._groups]
         with ThreadPoolExecutor(max_workers=8) as pool:
             reached = list(pool.map(fetch, [repo.path for repo in repos]))
+        try:
+            self.call_from_thread(self._on_pulls, self._scan_pulls())
+        except Exception as error:  # noqa: BLE001 - reported, never fatal
+            self.call_from_thread(
+                self.notify, f"could not list pull requests: {error}", severity="warning"
+            )
         # A failed fetch still bumps FETCH_HEAD's mtime, so without this the
         # pane would report "checked just now" for a remote never contacted.
         unreachable = {
@@ -476,6 +698,26 @@ class TaskViewerApp(App):
 
     def _scan(self) -> dict[Path, GitInfo | None]:
         return {project.path: load_git_info(project.path) for project in self._projects}
+
+    def _scan_pulls(self) -> tuple[dict[Path, PullRequest], set[Path]]:
+        """Open PRs for every project, keyed by the checkout they belong to.
+
+        One `gh` call per repository — a worktree's PR is listed by its repo,
+        so asking each worktree separately would just repeat the round trip.
+        """
+        found: dict[Path, PullRequest] = {}
+        unreachable: set[Path] = set()
+        for group in self._groups:
+            listing = load_pull_requests(group.project.path)
+            if not listing.reached:
+                # Rendering nothing would look exactly like a clear queue.
+                unreachable.add(group.project.path)
+                continue
+            for project in (group.project, *group.worktrees):
+                info = self._git_info.get(project.path)
+                if info and info.branch in listing.by_branch:
+                    found[project.path] = listing.by_branch[info.branch]
+        return found, unreachable
 
     def _on_git_info(self, scanned: dict[Path, GitInfo | None]) -> None:
         self._git_info = scanned
@@ -736,6 +978,7 @@ class TaskViewerApp(App):
         lines += _git_section(
             self._git_info.get(project.path), project.path in self._unreachable
         )
+        lines += _pull_request_section(self._pulls.get(project.path))
         active = load_tasks(project.tasks_dir, _ACTIVE_STATES)
         if active:
             lines += ["", "## Active tasks", ""]
@@ -765,7 +1008,11 @@ def _format_row(task: Task, number_width: int) -> str:
 
 
 def _format_project_row(
-    project: Project, info: GitInfo | None, marker: str = "  ", note: str = ""
+    project: Project,
+    info: GitInfo | None,
+    marker: str = "  ",
+    note: str = "",
+    pull: PullRequest | None = None,
 ) -> str:
     """Two lines: the project and its task count, then its git state.
 
@@ -777,13 +1024,15 @@ def _format_project_row(
     counts = count_states(project.tasks_dir)
     active = counts["open"] + counts["ongoing"]
     row = f"{marker}{escape(project.name)}  [dim]{active} active[/]"
-    state = _format_git_line(info).strip()
+    state = (_format_pr_marker(pull).strip() + " " + _format_git_line(info).strip()).strip()
     if note:
         state = f"{note} · {state}" if state else note
     return f"{row}\n  {state}" if state else row
 
 
-def _format_folded_note(worktrees: list[GitInfo | None]) -> str:
+def _format_folded_note(
+    worktrees: list[GitInfo | None], pulls: list[PullRequest | None] | None = None
+) -> str:
     """``3 wt ✎2 ✔3⚠`` — what is folded away, most decision-relevant first.
 
     A merged worktree can be deleted; a merged worktree holding uncommitted
@@ -795,6 +1044,11 @@ def _format_folded_note(worktrees: list[GitInfo | None]) -> str:
     dirty = sum(1 for info in known if info.dirty)
     unpushed = sum(1 for info in known if info.unpushed or _never_pushed(info))
     parts = [f"[dim]{len(worktrees)} wt[/]"]
+    open_prs = [pull for pull in (pulls or []) if pull is not None]
+    if open_prs:
+        # Otherwise the only way to learn a PR is waiting is to expand and look.
+        style = "bold red" if any(p.blocking for p in open_prs) else "green"
+        parts.append(f"[{style}]{len(open_prs)} PR[/]")
     if dirty:
         parts.append(f"[cyan]✎{dirty}[/]")
     if unpushed:
@@ -810,7 +1064,12 @@ def _never_pushed(info: GitInfo) -> bool:
     return info.has_remote and info.upstream is None and not info.merged
 
 
-def _format_worktree_row(project: Project, repo: Project, info: GitInfo | None) -> str:
+def _format_worktree_row(
+    project: Project,
+    repo: Project,
+    info: GitInfo | None,
+    pull: PullRequest | None = None,
+) -> str:
     """One line per worktree, indented a level deeper than its repo's own line.
 
     The folder suffix is the identity rather than the branch: it is what you
@@ -821,7 +1080,20 @@ def _format_worktree_row(project: Project, repo: Project, info: GitInfo | None) 
     shown = escape(_shorten(name, _WORKTREE_NAME_WIDTH))
     if info is None:
         return f"    [dim]{shown}[/]"
-    return f"    {shown}{_format_state(info)}"
+    return f"    {shown}{_format_pr_marker(pull)}{_format_state(info)}"
+
+
+def _format_pr_marker(pull: PullRequest | None) -> str:
+    """``#453`` — red when it cannot land, yellow when it needs a look."""
+    if pull is None:
+        return ""
+    if pull.blocking:
+        style = "bold red"
+    elif pull.warnings:
+        style = "yellow"
+    else:
+        style = "green"
+    return f" [{style}]#{pull.number}[/]"
 
 
 def _worktree_suffix(name: str, repo: str) -> str:
@@ -880,6 +1152,24 @@ def _remote_markers(info: GitInfo) -> list[str]:
     if info.unpulled and info.tracks_own_branch:
         markers.append(f"[bold cyan]↓{info.unpulled}[/]")
     return markers
+
+
+def _run_editor(editor: str, path: Path) -> subprocess.CompletedProcess | None:
+    """Hand the file to $EDITOR; ``None`` if it could not be started."""
+    try:
+        return subprocess.run([*shlex.split(editor), str(path)])
+    except (OSError, ValueError):
+        return None
+
+
+def _literal(text: str) -> str:
+    """Render ``text`` as itself, whatever brackets it contains.
+
+    ``rich.markup.escape`` is not enough: its tag pattern only matches
+    lowercase, so it leaves ``[WIP]`` alone while the renderer still eats it —
+    a PR title silently loses its prefix in the dialog asking about it.
+    """
+    return text.replace("\\", "\\\\").replace("[", "\\[")
 
 
 def _shorten(text: str, width: int) -> str:
@@ -956,6 +1246,65 @@ def _git_section(info: GitInfo | None, unreachable: bool = False) -> list[str]:
         if info.ahead > len(info.subjects):
             lines.append(f"- …and {info.ahead - len(info.subjects)} more")
     return lines
+
+
+def _pull_request_section(pull: PullRequest | None) -> list[str]:
+    """The PR this branch has open: what it says, and whether it can land."""
+    if pull is None:
+        return []
+    lines = [
+        "",
+        f"## Pull request #{pull.number}",
+        "",
+        f"**{escape_markdown(pull.title)}**",
+        "",
+        f"- **Size** {pull.diffstat}",
+        f"- **Checks** {escape_markdown(checks_summary(pull))}",
+    ]
+    review = pull.review_decision.replace("_", " ").lower()
+    if review:
+        lines.append(f"- **Review** {review}")
+    if pull.blocking:
+        lines.append(f"- **Merge** ⚠ **cannot merge** — {pull.blocking}")
+    else:
+        lines.append("- **Merge** press `M`")
+    for warning in pull.warnings:
+        lines.append(f"- ⚠ {escape_markdown(warning)}")
+    lines += ["", f"[{pull.url}]({pull.url})"]
+
+    # Comments come before the description: the description is the agent
+    # explaining its own work, the comments are why you would say no.
+    human = pull.human_comments
+    if human:
+        lines += ["", f"### {_plural(len(human), 'comment')}", ""]
+        for entry in human[-5:]:
+            first = entry.body.strip().splitlines()[0] if entry.body.strip() else ""
+            when = f" · {_relative(entry.created_at)}" if entry.created_at else ""
+            lines.append(
+                f"- **{escape_markdown(entry.author)}**{when} — "
+                f"{escape_markdown(_shorten(first, 160))}"
+            )
+        if len(human) > 5:
+            lines.append(f"- *…{len(human) - 5} older*")
+        lines += ["", "*`m` to reply.*"]
+
+    if pull.body.strip():
+        lines += ["", "### Description", "", pull.body.strip()]
+    return lines
+
+
+def _relative(timestamp: str) -> str:
+    """`3h ago` from an ISO 8601 stamp, so you can see what is new."""
+    try:
+        moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    return describe_age_phrase(moment)
+
+
+def escape_markdown(text: str) -> str:
+    """A PR title is arbitrary text; keep it from re-styling the pane."""
+    return text.replace("*", "\\*").replace("_", "\\_").replace("`", "\\`")
 
 
 def _drift_note(info: GitInfo) -> str:
