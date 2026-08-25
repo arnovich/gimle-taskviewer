@@ -1005,11 +1005,9 @@ class TaskViewerApp(App):
         active = load_tasks(project.tasks_dir, _ACTIVE_STATES)
         if active:
             lines += ["", "## Active tasks", ""]
-            for task in active[:25]:
+            for task in active:
                 number = f"`{task.number}` " if task.number else ""
                 lines.append(f"- {_STATE_MARK[task.state]} {number}{task.title}")
-            if len(active) > 25:
-                lines.append(f"- …and {len(active) - 25} more")
         lines += ["", "*Press `→` or `Enter` to open.*"]
         self.query_one(Markdown).update("\n".join(lines))
 
