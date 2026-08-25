@@ -982,3 +982,55 @@ async def test_gh_being_unavailable_is_not_an_empty_queue(
         await app.workers.wait_for_complete()
         await pilot.pause()
         assert "gh unavailable" in app.sub_title
+
+
+@pytest.mark.asyncio
+async def test_w_opens_the_pr_in_a_browser(
+    pr_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[str] = []
+    from task_viewer.pull_requests import ActionResult
+
+    monkeypatch.setattr(
+        "task_viewer.app.open_in_browser",
+        lambda url: opened.append(url) or ActionResult(True, f"opened {url}"),
+    )
+    app = TaskViewerApp(find_projects(pr_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await _open_expanded(app, pilot)
+        await pilot.press("w")
+        await pilot.pause()
+    assert opened == ["https://github.com/arnovich/gimle-asgard/pull/453"]
+
+
+@pytest.mark.asyncio
+async def test_clicking_the_link_in_the_pane_opens_it(
+    pr_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The URL was text you had to select with a mouse; make it a link."""
+    opened: list[str] = []
+    from task_viewer.pull_requests import ActionResult
+
+    monkeypatch.setattr(
+        "task_viewer.app.open_in_browser",
+        lambda url: opened.append(url) or ActionResult(True, "opened"),
+    )
+    app = TaskViewerApp(find_projects(pr_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await _open_expanded(app, pilot)
+        app.post_message(
+            Markdown.LinkClicked(
+                app.query_one(Markdown), "https://github.com/arnovich/x/pull/9"
+            )
+        )
+        await pilot.pause()
+    assert opened == ["https://github.com/arnovich/x/pull/9"]
+
+
+@pytest.mark.asyncio
+async def test_w_does_nothing_without_a_pr(worktree_workspace: Path) -> None:
+    app = TaskViewerApp(find_projects(worktree_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.check_action("open_pr", ()) is None

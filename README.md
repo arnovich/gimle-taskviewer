@@ -210,6 +210,10 @@ on every PR and would bury the one comment that is review feedback.
 `m` opens `$EDITOR` with a template, the way `git commit` does; save and quit to
 post, leave it empty to abort.
 
+`w` opens the PR in your browser, and the URL in the pane is a real link — click
+it or press `w`. The browser is launched detached with its streams closed, so a
+console browser can never take over the terminal `tv` is running in.
+
 `M` merges, with a merge commit. It asks first — the dialog names the PR, its
 checks and anything that would block it:
 
@@ -241,6 +245,7 @@ the dialog tells you what is wrong and the decision stays yours. `a` adds
 | `u`        | Fast-forward the highlighted project (workspace mode) |
 | `M`        | Merge the highlighted worktree's pull request       |
 | `m`        | Comment on it (opens `$EDITOR`)                     |
+| `w`        | Open the pull request in a browser                  |
 | `Tab`      | Switch focus between the two panes                 |
 | `c`        | **Work on the task with Claude Code** (see below)  |
 | `R`        | **Review all tasks** with Claude Code, in the background (see below) |

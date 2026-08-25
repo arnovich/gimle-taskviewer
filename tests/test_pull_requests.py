@@ -283,3 +283,76 @@ def test_the_slug_is_passed_to_gh_so_a_worktree_resolves_like_its_repo(
     load_pull_requests(repo)
     listed = [c for c in calls.read_text().splitlines() if c.startswith("pr list")]
     assert listed and listed[-1].endswith("--repo arnovich/gimle-mimir")
+
+
+# --- opening a PR in a browser ----------------------------------------------
+
+
+def test_the_url_is_handed_to_the_platform_opener(monkeypatch: pytest.MonkeyPatch) -> None:
+    from task_viewer import pull_requests
+
+    launched: list[list[str]] = []
+    monkeypatch.setattr(pull_requests, "_opener", lambda: "xdg-open")
+    monkeypatch.setattr(
+        pull_requests.subprocess, "Popen", lambda cmd, **kw: launched.append(cmd)
+    )
+    result = pull_requests.open_in_browser("https://example.com/pull/1")
+    assert result.ok is True
+    assert launched == [["xdg-open", "https://example.com/pull/1"]]
+
+
+def test_the_browser_is_detached_so_it_cannot_take_the_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A console browser inheriting the TUI's terminal would hijack it."""
+    from task_viewer import pull_requests
+
+    seen: dict = {}
+    monkeypatch.setattr(pull_requests, "_opener", lambda: "xdg-open")
+
+    def fake_popen(cmd, **kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(pull_requests.subprocess, "Popen", fake_popen)
+    pull_requests.open_in_browser("https://example.com/pull/1")
+    assert seen["start_new_session"] is True
+    assert seen["stdin"] == pull_requests.subprocess.DEVNULL
+    assert seen["stdout"] == pull_requests.subprocess.DEVNULL
+
+
+def test_a_missing_opener_is_reported_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:
+    from task_viewer import pull_requests
+
+    monkeypatch.setattr(pull_requests, "_opener", lambda: "")
+    result = pull_requests.open_in_browser("https://example.com/pull/1")
+    assert result.ok is False
+    assert "no way to open" in result.message
+
+
+def test_an_opener_that_will_not_start_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    from task_viewer import pull_requests
+
+    monkeypatch.setattr(pull_requests, "_opener", lambda: "xdg-open")
+
+    def boom(cmd, **kwargs):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(pull_requests.subprocess, "Popen", boom)
+    result = pull_requests.open_in_browser("https://example.com/pull/1")
+    assert result.ok is False
+
+
+@pytest.mark.parametrize("url", ["", "not-a-url", "javascript:alert(1)", "file:///etc/passwd"])
+def test_only_http_urls_are_opened(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
+    """The URL comes from an API response; do not hand anything to a shell-less
+    opener that is not plainly a web page."""
+    from task_viewer import pull_requests
+
+    launched: list = []
+    monkeypatch.setattr(pull_requests, "_opener", lambda: "xdg-open")
+    monkeypatch.setattr(
+        pull_requests.subprocess, "Popen", lambda cmd, **kw: launched.append(cmd)
+    )
+    result = pull_requests.open_in_browser(url)
+    assert result.ok is False
+    assert launched == []
