@@ -172,6 +172,63 @@ That "checked" is doing real work: `up to date` can only ever mean *as of the
 last fetch*. A **failed** fetch still updates git's own `FETCH_HEAD` timestamp,
 so `tv` tracks which remotes it actually reached rather than trusting that file.
 
+## Pull requests
+
+Under the `grind` loop each worktree becomes one pull request, so the PR lives
+on the worktree row. Its number shows there — green when it would merge
+cleanly, yellow when it would not:
+
+```
+  ▾ gimle-mimir  37 active
+    ⎇ main ✎21 9m
+      task-140 #453 +2 -268 3w
+```
+
+Highlighting it puts the PR in the right-hand pane:
+
+```
+## Pull request #453
+
+**Task 140: derivative/phase-space augmented encoder input features**
+
+- **Checks** 2/2 passing
+- **Merge** ⚠ has conflicts with main — `M` merges anyway
+
+### Description
+...
+
+### 4 comments
+
+- **erikarne** — Add the 512-case benchmark before this lands.
+
+*`m` to reply.*
+```
+
+Comments from bots — deploy previews, CI summaries — are filtered out; they post
+on every PR and would bury the one comment that is review feedback.
+
+`m` opens `$EDITOR` with a template, the way `git commit` does; save and quit to
+post, leave it empty to abort.
+
+`M` merges, with a merge commit. It asks first — the dialog names the PR, its
+checks and anything that would block it:
+
+```
+┌ Merge #453 into main? ─────────────────────────┐
+│   Task 140: derivative-augmented token features│
+│   gimle-mimir-task-140                         │
+│   checks: 2/2 passing                          │
+│   ⚠  has conflicts with main                   │
+│                                                │
+│   y  merge     a  admin merge     esc  cancel  │
+└────────────────────────────────────────────────┘
+```
+
+Nothing stops you merging a red PR. `main` is unprotected in these repos, so a
+plain merge already goes through and pretending otherwise would be theatre —
+the dialog tells you what is wrong and the decision stays yours. `a` adds
+`--admin`, which matters only if branch protection is ever turned on.
+
 ## Keys
 
 | Key        | Action                                             |
@@ -182,6 +239,8 @@ so `tv` tracks which remotes it actually reached rather than trusting that file.
 | `space`    | Fold or unfold a repo's worktrees (workspace mode)  |
 | `f`        | Fetch all repos from their remotes (workspace mode) |
 | `u`        | Fast-forward the highlighted project (workspace mode) |
+| `M`        | Merge the highlighted worktree's pull request       |
+| `m`        | Comment on it (opens `$EDITOR`)                     |
 | `Tab`      | Switch focus between the two panes                 |
 | `c`        | **Work on the task with Claude Code** (see below)  |
 | `R`        | **Review all tasks** with Claude Code, in the background (see below) |

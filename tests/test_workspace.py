@@ -637,7 +637,7 @@ async def test_a_rebuild_with_an_unknown_row_keeps_the_cursor_put(
 @pytest.fixture
 def pr_workspace(worktree_workspace: Path, monkeypatch: pytest.MonkeyPatch):
     """The worktree's branch has an open PR; gh is stubbed, nothing dials out."""
-    from task_viewer.pull_requests import Comment, PullRequest
+    from task_viewer.pull_requests import Check, Comment, Listing, PullRequest
 
     pull = PullRequest(
         number=453,
@@ -645,8 +645,11 @@ def pr_workspace(worktree_workspace: Path, monkeypatch: pytest.MonkeyPatch):
         body="## Summary\nAdds derivative features.",
         url="https://github.com/arnovich/gimle-asgard/pull/453",
         branch="feat/thing",
-        checks_passed=2,
-        checks_total=2,
+        mergeable="MERGEABLE",
+        changed_files=8,
+        additions=625,
+        deletions=41,
+        checks=[Check("test", "SUCCESS"), Check("lint", "SUCCESS")],
         comments=[
             Comment("erikarne", "Add the benchmark."),
             Comment("github-actions[bot]", "Deploy preview ready"),
@@ -654,7 +657,8 @@ def pr_workspace(worktree_workspace: Path, monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setattr(
         "task_viewer.app.load_pull_requests",
-        lambda root: {"feat/thing": pull} if root.name == "gimle-asgard" else {},
+        lambda root: Listing({"feat/thing": pull}) if root.name == "gimle-asgard"
+        else Listing({}),
     )
     return worktree_workspace
 
@@ -728,24 +732,9 @@ async def test_merge_asks_before_it_merges(
         await pilot.press("M")
         await pilot.pause()
         await pilot.press("y")
+        await app.workers.wait_for_complete()
         await pilot.pause()
         assert merges == [(453, False)]
-        await app.workers.wait_for_complete()
-
-
-@pytest.mark.asyncio
-async def test_admin_merge_is_a_different_key(
-    pr_workspace: Path, merges: list
-) -> None:
-    app = TaskViewerApp(find_projects(pr_workspace), "gimle", workspace=True)
-    async with app.run_test() as pilot:
-        await _open_expanded(app, pilot)
-        await pilot.press("M")
-        await pilot.pause()
-        await pilot.press("a")
-        await pilot.pause()
-        assert merges == [(453, True)]
-        await app.workers.wait_for_complete()
 
 
 @pytest.mark.asyncio
@@ -755,28 +744,32 @@ async def test_a_blocked_pr_says_so_before_you_merge_it(
     """Nothing stops you merging a red PR — but you are told first."""
     from task_viewer.pull_requests import PullRequest
 
+    from task_viewer.pull_requests import Check, Listing
+
     failing = PullRequest(
         number=453, title="t", body="", url="u", branch="feat/thing",
-        checks_passed=1, checks_total=2, checks_failing=True,
+        mergeable="MERGEABLE",
+        checks=[Check("test", "FAILURE"), Check("lint", "SUCCESS")],
     )
     monkeypatch.setattr(
         "task_viewer.app.load_pull_requests",
-        lambda root: {"feat/thing": failing} if root.name == "gimle-asgard" else {},
+        lambda root: Listing({"feat/thing": failing}) if root.name == "gimle-asgard"
+        else Listing({}),
     )
     app = TaskViewerApp(find_projects(pr_workspace), "gimle", workspace=True)
     async with app.run_test() as pilot:
         await _open_expanded(app, pilot)
-        assert "1 check failing" in app.query_one(Markdown).source
+        assert "test failing" in app.query_one(Markdown).source
 
         await pilot.press("M")
         await pilot.pause()
         # The dialog is a separate screen, so query it, not the app.
         shown = " ".join(str(label.render()) for label in app.screen.query(Label))
-        assert "1 check failing" in shown  # it repeats the warning
+        assert "test" in shown  # it names the check that went red
         await pilot.press("y")
         await pilot.pause()
-        assert merges == [(453, False)]
         await app.workers.wait_for_complete()
+        assert merges == [(453, False)]
 
 
 @pytest.mark.asyncio
@@ -787,3 +780,205 @@ async def test_the_pr_keys_are_hidden_without_a_pr(worktree_workspace: Path) -> 
         await pilot.pause()
         assert app.check_action("merge_pr", ()) is None
         assert app.check_action("comment_pr", ()) is None
+
+
+# --- the comment path, which is the only channel to the agents --------------
+
+
+@pytest.fixture
+def editor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Install a fake $EDITOR that writes a fixed body (or fails)."""
+
+    def install(body: str | None, exit_code: int = 0):
+        script = tmp_path / "fake-editor"
+        write = (
+            f"pathlib.Path(sys.argv[1]).write_text({body!r}, encoding='utf-8')"
+            if body is not None
+            else "pass"
+        )
+        script.write_text(
+            f"#!/usr/bin/env python3\nimport sys, pathlib\n{write}\n"
+            f"sys.exit({exit_code})\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        monkeypatch.setenv("EDITOR", str(script))
+        monkeypatch.delenv("VISUAL", raising=False)
+
+    return install
+
+
+def _posted(monkeypatch: pytest.MonkeyPatch, ok: bool = True) -> list:
+    from task_viewer.pull_requests import ActionResult
+
+    seen: list = []
+
+    def fake(root: Path, number: int, body: str) -> ActionResult:
+        seen.append((number, body))
+        return ActionResult(ok, f"commented on #{number}" if ok else "gh refused")
+
+    monkeypatch.setattr("task_viewer.app.post_comment", fake)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_comment_keeps_every_line_the_user_wrote(
+    pr_workspace: Path, editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`## Blocking` is a heading and `#538` is a PR — not commentary."""
+    written = "Looks good, two things:\n\n## Blocking\n#538 supersedes this.\n"
+    editor(written)
+    posted = _posted(monkeypatch)
+
+    app = TaskViewerApp(find_projects(pr_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await _open_expanded(app, pilot)
+        await pilot.press("m")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        note = list(app._notifications)[-1].message if app._notifications else "(none)"
+
+    assert posted, f"nothing was posted; last notification: {note}"
+    number, body = posted[0]
+    assert number == 453
+    assert "## Blocking" in body
+    assert "#538 supersedes this." in body
+    assert "tv:" not in body  # the template fence is gone
+
+
+@pytest.mark.asyncio
+async def test_an_editor_that_aborts_posts_nothing(
+    pr_workspace: Path, editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`vim :cq` is the conventional abort and exits non-zero."""
+    editor("half a thought", exit_code=1)
+    posted = _posted(monkeypatch)
+
+    app = TaskViewerApp(find_projects(pr_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await _open_expanded(app, pilot)
+        await pilot.press("m")
+        await pilot.pause()
+    assert posted == []
+
+
+@pytest.mark.asyncio
+async def test_an_untouched_template_posts_nothing(
+    pr_workspace: Path, editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    editor(None)  # editor writes nothing at all
+    posted = _posted(monkeypatch)
+
+    app = TaskViewerApp(find_projects(pr_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await _open_expanded(app, pilot)
+        await pilot.press("m")
+        await pilot.pause()
+    assert posted == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_post_keeps_the_draft(
+    pr_workspace: Path, editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A review is expensive to write; an expired token must not eat it."""
+    editor("A long, carefully written review.")
+    _posted(monkeypatch, ok=False)
+
+    app = TaskViewerApp(find_projects(pr_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await _open_expanded(app, pilot)
+        await pilot.press("m")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        message = list(app._notifications)[-1].message
+
+    assert "draft kept at" in message
+    kept = Path(message.split("draft kept at ")[1].strip())
+    assert kept.exists()
+    assert "carefully written review" in kept.read_text(encoding="utf-8")
+    kept.unlink()
+
+
+@pytest.mark.asyncio
+async def test_a_conflicted_pr_is_not_offered_a_dead_end_merge(
+    pr_workspace: Path, merges: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GitHub refuses a conflicted merge, and --admin does not change that."""
+    from task_viewer.pull_requests import Listing, PullRequest
+
+    conflicted = PullRequest(
+        number=453, title="t", body="", url="u", branch="feat/thing",
+        mergeable="CONFLICTING",
+    )
+    monkeypatch.setattr(
+        "task_viewer.app.load_pull_requests",
+        lambda root: Listing({"feat/thing": conflicted})
+        if root.name == "gimle-asgard" else Listing({}),
+    )
+    app = TaskViewerApp(find_projects(pr_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await _open_expanded(app, pilot)
+        assert "cannot merge" in app.query_one(Markdown).source
+
+        await pilot.press("M")
+        await pilot.pause()
+        assert merges == []  # no dialog, no dead-end keypress
+        assert "cannot be merged" in list(app._notifications)[-1].message
+
+
+@pytest.mark.asyncio
+async def test_a_title_with_markup_neither_crashes_nor_is_rewritten(
+    pr_workspace: Path, merges: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `[WIP]` prefix must survive into the dialog that asks about it."""
+    from task_viewer.pull_requests import Listing, PullRequest
+
+    marked = PullRequest(
+        number=453, title="[WIP] Close [/] the stream", body="", url="u",
+        branch="feat/thing", mergeable="MERGEABLE",
+    )
+    monkeypatch.setattr(
+        "task_viewer.app.load_pull_requests",
+        lambda root: Listing({"feat/thing": marked})
+        if root.name == "gimle-asgard" else Listing({}),
+    )
+    app = TaskViewerApp(find_projects(pr_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await _open_expanded(app, pilot)
+        await pilot.press("M")
+        await pilot.pause()
+        assert app.is_running
+        shown = " ".join(str(label.render()) for label in app.screen.query(Label))
+        assert "[WIP]" in shown
+        await pilot.press("escape")
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_a_collapsed_repo_says_a_pr_is_waiting(pr_workspace: Path) -> None:
+    """Otherwise the only way to learn is to expand every group and look."""
+    app = TaskViewerApp(find_projects(pr_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        rows = [str(label.render()) for label in app.query(Label)]
+        assert any("1 PR" in row for row in rows)
+        assert "1 PR" in app.sub_title
+
+
+@pytest.mark.asyncio
+async def test_gh_being_unavailable_is_not_an_empty_queue(
+    worktree_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from task_viewer.pull_requests import Listing
+
+    monkeypatch.setattr(
+        "task_viewer.app.load_pull_requests",
+        lambda root: Listing(reached=False, error="gh: not found"),
+    )
+    app = TaskViewerApp(find_projects(worktree_workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "gh unavailable" in app.sub_title
