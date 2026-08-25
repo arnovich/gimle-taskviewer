@@ -2,6 +2,36 @@
 
 A terminal UI for browsing a project's markdown task files.
 
+## How it fits together
+
+`tv` is where you decide what happens next; agents do the work and bring back a
+pull request. The loop:
+
+```
+  you ──n/p──▶ tv ──sets next:──▶ tasks/open/*.md      the queue you set
+                                        │              (only you write next:)
+                                        ▼  lowest rank first
+     ┌──────────────────────── grind ────────────────────────┐
+     │  claim on main → worktree → plan → reviewed by a      │
+     │  panel and by Codex → build → reviewed again → PR     │
+     └───────────────────────────┬───────────────────────────┘
+                                 ▼
+  you ◀── M merge / m comment ── tv ◀── the PR, on its worktree row
+```
+
+Four pieces, each with one job:
+
+| Piece | Where | Job |
+|---|---|---|
+| **the standard** | `gimle-skills/references/task-format.md` | what a task file *is* — one copy, everything else points at it |
+| **`next:`** | task frontmatter, set in `tv` | the running order. **Only the owner writes it** |
+| **`grind`** | `gimle-skills/skills/grind/` | drains the queue, one task per lap, ending at an open PR |
+| **`tv`** | this repo | rank the queue, watch the worktrees, review and merge the PRs |
+
+A repo joins by creating `tasks/open/` and pasting a pointer into its
+`CLAUDE.md`. Nothing needs registering: `tv` lists any folder with tasks, and
+`grind` is installed workspace-wide. See *Setting up a new repo* in the standard.
+
 ## Task layout
 
 `tv` expects a project to keep its tasks under a `tasks/` folder split into
