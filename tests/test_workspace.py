@@ -1034,3 +1034,23 @@ async def test_w_does_nothing_without_a_pr(worktree_workspace: Path) -> None:
         await app.workers.wait_for_complete()
         await pilot.pause()
         assert app.check_action("open_pr", ()) is None
+
+
+@pytest.mark.asyncio
+async def test_the_summary_lists_every_active_task(tmp_path: Path) -> None:
+    """The pane scrolls, so truncating the list only hid work from view."""
+    workspace = tmp_path / "gimle"
+    open_dir = workspace / "big" / "tasks" / "open"
+    open_dir.mkdir(parents=True)
+    for n in range(40):
+        (open_dir / f"{n:03d}-task.md").write_text(f"# Task number {n:03d}\n")
+
+    app = TaskViewerApp(find_projects(workspace), "gimle", workspace=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        source = app.query_one(Markdown).source
+        assert source.count("\n- ○ ") == 40
+        assert "more" not in source
+        assert "Task number 000" in source
+        assert "Task number 039" in source
+        await app.workers.wait_for_complete()
