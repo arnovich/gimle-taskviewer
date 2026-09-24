@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import subprocess
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -110,7 +110,7 @@ def _section(page: str, anchor: str) -> str:
 def test_the_dashboard_says_who_is_waiting_and_what_is_running(world) -> None:
     page = world["client"].get("/").text
     needs_you = _section(page, "needs-you")
-    assert "(2)" in needs_you  # the file task and the directory task
+    assert 'class="number">2<' in needs_you  # the file task and the directory task
     assert ">Asked<" in needs_you and ">Dir task<" in needs_you and "claude/abc" in needs_you
     assert "Mine" not in needs_you  # the owner asked that one
     waiting_on_agent = _section(page, "needs-agent")
@@ -127,7 +127,7 @@ def test_the_repo_page_lists_active_tasks_and_can_show_closed(world) -> None:
     client = world["client"]
     page = client.get("/r/alpha").text
     assert "Asked" in page and "Busy" in page and "Done" not in page
-    assert 'class="badge question"' in page  # the waiting marker
+    assert 'class="ask"' in page  # the waiting marker
     assert "Done" in client.get("/r/alpha?closed=1").text
     assert client.get("/r/nope").status_code == 404
     assert client.get("/r/alpha/t/999-missing").status_code == 404
@@ -136,12 +136,13 @@ def test_the_repo_page_lists_active_tasks_and_can_show_closed(world) -> None:
 def test_the_task_page_renders_the_body_and_the_thread(world) -> None:
     page = world["client"].get("/r/alpha/t/001-asked").text
     assert "<h2>Context</h2>" in page
+    assert page.count("Asked</h1>") == 1  # the file's own `# Asked` is not repeated
     assert "Which GPU is the reference?" in page
-    assert 'class="badge question"' in page
-    assert "Waiting for an answer from you" in page
+    assert 'class="entry question"' in page
+    assert "Your answer is needed." in page
     # The thread is rendered as entries, not as part of the body.
     assert page.count("Which GPU") == 1
-    assert '<option value="answer" selected' in page
+    assert 'value="answer" checked' in page
 
 
 def test_task_markdown_cannot_inject_html(world, tmp_path: Path) -> None:
@@ -164,6 +165,7 @@ def test_an_answer_is_appended_and_pushed(world) -> None:
     assert _subjects(world["alpha"])[0] == "task 001: answer from erikarne"
     needs_you = _section(client.get("/").text, "needs-you")
     assert ">Asked<" not in needs_you and ">Dir task<" in needs_you
+    assert 'class="number">1<' in needs_you
 
 
 def test_a_reply_on_a_directory_task_goes_to_the_description(world) -> None:
@@ -275,6 +277,8 @@ def test_github_links_and_ages() -> None:
     now = datetime.now(timezone.utc)
     assert _ago(now) == "just now"
     assert _ago(now.replace(tzinfo=None)) == "just now"
+    assert _ago(now + timedelta(minutes=3)) == "just now"  # clock skew, not prophecy
+    assert _ago(now + timedelta(hours=3)) == "in the future"
     assert _ago(date(2020, 1, 1)).endswith("ago")
     assert _ago("2020-01-01T10:00:00Z").endswith("ago")
     assert _ago("yesterday-ish") == "yesterday-ish"

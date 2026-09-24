@@ -1,60 +1,76 @@
 {% extends "base.html" %}
-{% block title %}dashboard{% endblock %}
+{% block title %}Dashboard{% endblock %}
 {% block content %}
-<h1>Dashboard <span class="muted">· answering as <code>{{ owner }}</code></span></h1>
-
-<h2 id="needs-you">Needs you <span class="muted">({{ needs_owner|length }})</span></h2>
+<h2 id="needs-you">Needs you</h2>
+<div class="hero">
+  <span class="number{% if not needs_owner %} zero{% endif %}">{{ needs_owner|length }}</span>
+  <span class="caption">{% if needs_owner|length == 1 %}task is waiting for your answer{% elif needs_owner %}tasks are waiting for your answer{% else %}Nobody is waiting on you.{% endif %}</span>
+</div>
 {% if needs_owner %}
 <table id="needs-you-list">
-  <tr><th>Repo</th><th>Task</th><th>Asked by</th><th>When</th></tr>
+  <thead><tr><th>Repo</th><th>Task</th><th>Asked by</th><th class="num">When</th></tr></thead>
+  <tbody>
   {% for w in needs_owner %}
   <tr>
-    <td>{{ w.repo }}</td>
+    <td class="dim">{{ w.repo }}</td>
     <td><a href="{{ task_url(w.repo, w.task.task_id) }}">{{ w.task.title }}</a></td>
     <td><code>{{ w.question.author or "?" }}</code></td>
-    <td class="num">{{ w.question.when|ago if w.question.when else w.question.at }}</td>
+    <td class="num dim">{{ w.question.when|ago if w.question.when else w.question.at }}</td>
   </tr>
   {% endfor %}
-</table>
-{% else %}<p class="muted">Nobody is waiting on you.</p>{% endif %}
-
-{% if needs_agent %}
-<h2 id="needs-agent">You asked, waiting on an agent <span class="muted">({{ needs_agent|length }})</span></h2>
-<table id="needs-agent-list">
-  {% for w in needs_agent %}
-  <tr><td>{{ w.repo }}</td><td><a href="{{ task_url(w.repo, w.task.task_id) }}">{{ w.task.title }}</a></td>
-      <td class="num">{{ w.question.when|ago if w.question.when else w.question.at }}</td></tr>
-  {% endfor %}
+  </tbody>
 </table>
 {% endif %}
 
-<h2 id="in-progress">In progress <span class="muted">({{ ongoing|length }})</span></h2>
+{% if needs_agent %}
+<h2 id="needs-agent">Waiting on an agent <span class="count">{{ needs_agent|length }}</span></h2>
+<p class="lede">Questions you asked that no agent has answered yet.</p>
+<table id="needs-agent-list">
+  <thead><tr><th>Repo</th><th>Task</th><th>State</th><th class="num">When</th></tr></thead>
+  <tbody>
+  {% for w in needs_agent %}
+  <tr>
+    <td class="dim">{{ w.repo }}</td>
+    <td><a href="{{ task_url(w.repo, w.task.task_id) }}">{{ w.task.title }}</a></td>
+    <td class="dim">{{ w.task.state }}</td>
+    <td class="num dim">{{ w.question.when|ago if w.question.when else w.question.at }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2 id="in-progress">In progress <span class="count">{{ ongoing|length }}</span></h2>
 {% if ongoing %}
 <table id="in-progress-list">
-  <tr><th>Repo</th><th>Task</th><th>Claimed by</th><th>Branch</th><th>Since</th></tr>
+  <thead><tr><th>Repo</th><th>Task</th><th>Claimed by</th><th>Branch</th><th class="num">Since</th></tr></thead>
+  <tbody>
   {% for repo, t in ongoing %}
   <tr>
-    <td>{{ repo }}</td>
+    <td class="dim">{{ repo }}</td>
     <td><a href="{{ task_url(repo, t.task_id) }}">{{ t.title }}</a></td>
     <td><code>{{ t.meta.get("claimed_by", "") }}</code></td>
     <td><code>{{ t.meta.get("branch", "") }}</code></td>
-    <td class="num">{{ t.meta.get("claimed_at", "")|ago }}</td>
+    <td class="num dim">{{ t.meta.get("claimed_at", "")|ago }}</td>
   </tr>
   {% endfor %}
+  </tbody>
 </table>
-{% else %}<p class="muted">Nothing is claimed right now.</p>{% endif %}
+{% else %}<p class="empty">Nothing is claimed right now.</p>{% endif %}
 
-<h2 id="repositories">Repositories</h2>
+<h2 id="repositories">Repositories <span class="count">{{ views|length }}</span></h2>
 <table id="repositories-list">
-  <tr><th>Repo</th><th>Open</th><th>Ongoing</th><th>Queue</th><th>Last reached</th></tr>
+  <thead><tr><th>Repo</th><th class="num">Open</th><th class="num">Ongoing</th><th>Queue</th><th class="num">Last reached</th></tr></thead>
+  <tbody>
   {% for v in views %}
   <tr>
-    <td><a href="{{ repo_url(v.name) }}">{{ v.name }}</a>{% if v.error %} <span class="bad">· {{ v.error }}</span>{% endif %}</td>
-    <td class="num">{{ v.counts.open }}</td>
-    <td class="num">{{ v.counts.ongoing }}</td>
-    <td>{% for t in v.queue %}<span class="rank">{{ t.next_rank }}</span> <a href="{{ task_url(v.name, t.task_id) }}">{{ t.title }}</a><br>{% endfor %}</td>
-    <td class="num">{% if v.refresh and v.refresh.at %}{{ v.refresh.at|ago }}{% else %}never{% endif %}{% if v.refresh and v.refresh.detail %} <span class="warn">· {{ v.refresh.detail }}</span>{% endif %}</td>
+    <td><a href="{{ repo_url(v.name) }}">{{ v.name }}</a>{% if v.error %}<br><span class="bad">{{ v.error }}</span>{% endif %}</td>
+    <td class="num dim">{{ v.counts.open }}</td>
+    <td class="num dim">{{ v.counts.ongoing }}</td>
+    <td>{% for t in v.queue %}<span class="rank">{{ t.next_rank }}</span> <a href="{{ task_url(v.name, t.task_id) }}">{{ t.title }}</a>{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">nothing ranked</span>{% endfor %}</td>
+    <td class="num dim">{% if v.refresh and v.refresh.at %}{{ v.refresh.at|ago }}{% else %}never{% endif %}{% if v.refresh and v.refresh.detail %}<br><span class="warn">{{ v.refresh.detail }}</span>{% endif %}</td>
   </tr>
   {% endfor %}
+  </tbody>
 </table>
 {% endblock %}
