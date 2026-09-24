@@ -57,21 +57,31 @@ read the thread before retrying a timed-out write.
 
 ## What the pages show
 
-Every page carries a sidebar: the repositories, each with its open count and
-an amber number where something there needs you; the total under *Needs you*;
-when the remotes were last checked; and Refresh. A `!` marks a repo whose
-remote could not be reached or could not be cloned.
+Every page carries a sidebar: the repositories, each with a dot for the
+health of its default branch's workflows (green passing, red failing, amber
+running, grey unknown), its open count and an amber number where something
+there needs you; the total under *Needs you*; when the remotes were last
+checked; and Refresh. A `!` marks a repo whose remote could not be reached,
+could not be cloned, or that GitHub could not be asked about.
 
 | Page | Shows | Writes |
 |---|---|---|
-| `/` | One screen. The **Needs you** count with its breakdown, the questions agents asked in full, and the other buckets — branches ready to merge, tasks given up on, ambiguous numbers — as folds. **Running now**: one card per agent handle with what it holds, when it was last seen (its branch tip, its last entry, its claim), its last note as a status line, and a *stale* flag after four quiet hours. **Up next**: per repo, the one task grind would take, or how many are ranked and held. **Activity**: the latest dozen events. | Refresh |
-| `/needs-you` | Every bucket in full, plus your own open questions waiting on an agent. | — |
+| `/` | One screen. The **Needs you** count with its breakdown: the questions agents asked and the open pull requests in full (each linked to its task through the branch number, with its checks, review and mergeability), and the other buckets — tasks given up on, ambiguous numbers — as folds. **CI**: runs in progress and recent failures, queued runs folded. **Running now**: one card per agent handle with what it holds, when it was last seen (its branch tip, its last entry, its claim), its last note as a status line, and a *stale* flag after four quiet hours. **Up next**: per repo, the one task grind would take, or how many are ranked and held. **Activity**: the latest dozen events. | Refresh |
+| `/needs-you` | Every bucket in full, plus your own open questions waiting on an agent, and — as housekeeping, not counted — closed tasks whose branch is still on the remote with no pull request. | — |
 | `/activity` | The last seven days across all repos, or one repo with `?repo=`: claims, plans, closes, merges, questions, answers, notes. | — |
-| `/r/<repo>` | The queue as grind reads it — every ranked task with the reason it is held and the one that is next — then the tasks (closed on request) with rank, priority, labels and the `?` marker. | — |
+| `/r/<repo>` | Its open pull requests, its CI (the latest dozen runs), the queue as grind reads it — every ranked task with the reason it is held and the one that is next — then the tasks (closed on request) with rank, priority, labels, the `?` marker and when each was created, sortable by any column (`?sort=title&dir=desc`) and searchable across title, labels and text (`?q=`). | — |
 | `/r/<repo>/t/<id>` | The task body, then its history: every commit that touched it on the default branch and every entry of its conversation, in one timeline; claim details; a link to the file on GitHub. | Append an entry · Do this first / Add to queue / Remove from queue |
 
-All of that is read from the repositories and nothing else. The git log is the
-activity log: every grind step is a commit on the default branch with a
+Pull requests and workflow runs come from GitHub through the `gh` CLI, with
+the login the machine already has (`gh auth login`, then `gh auth setup-git`
+for git itself). They are asked for on the same lazy cadence as the git
+fetch — only when a page load actually fetched — so a page open all day costs
+one `gh run list` and one `gh pr list` per repo per minute at most. A repo
+that is not on GitHub, or a `gh` that is missing or logged out, degrades to
+"could not be asked": everything read from git still works.
+
+Everything else is read from the repositories and nothing else. The git log is
+the activity log: every grind step is a commit on the default branch with a
 structured subject (`task 053: claim`, `task 053: plan`, `task 053: closed`),
 the control plane's own writes follow the same shape, and GitHub's merge
 commits name the branch they merged, so a pull request landing is one event.

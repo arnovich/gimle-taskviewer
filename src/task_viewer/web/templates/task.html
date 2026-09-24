@@ -9,6 +9,7 @@
   {% if task.priority %}<span>priority {{ task.priority }}</span>{% endif %}
   {% if task.labels %}<span class="tags">{% for label in task.labels %}<span class="tag">{{ label }}</span>{% endfor %}</span>{% endif %}
   {% if task.meta.get("claimed_by") %}<span>claimed by <code>{{ task.meta["claimed_by"] }}</code> {{ task.meta.get("claimed_at", "")|ago }}{% if task.meta.get("branch") %} on <code>{{ task.meta["branch"] }}</code>{% endif %}</span>{% endif %}
+  {% if pull %}<span id="task-pull">pull request {% if pull.pull.url %}<a href="{{ pull.pull.url }}">#{{ pull.pull.number }}</a>{% else %}#{{ pull.pull.number }}{% endif %} <span class="checks {{ pull.pull.checks }}">{% if pull.pull.checks == "none" %}no checks{% else %}{{ pull.pull.checks }} {{ pull.pull.checks_done }}/{{ pull.pull.checks_total }}{% endif %}</span>{% if pull.pull.draft %} <span class="tag">draft</span>{% endif %}{% if pull.pull.mergeable == "CONFLICTING" %} <span class="warn">conflicts</span>{% endif %}</span>{% endif %}
   {% set gh = github_url(view.mirror.url, task, view.mirror.branch) %}{% if gh %}<a href="{{ gh }}">View on GitHub</a>{% endif %}
 </div>
 
