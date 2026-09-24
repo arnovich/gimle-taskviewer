@@ -13,8 +13,9 @@ markdown is rendered with raw HTML off, since agents write those files.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -30,6 +31,14 @@ from ..git_info import describe_age_phrase
 from .control import QUEUE_OPS, ControlError, ControlPlane, InvalidInput
 
 _TEMPLATES = Path(__file__).parent / "templates"
+
+# Nearly every task file opens with `# <title>`; the page already shows the
+# title, so the body starts after it.
+_LEADING_H1_RE = re.compile(r"\A\s*#[ \t]+[^\n]*\n")
+
+# Agents' clocks and this machine's disagree by seconds, not hours. A stamp a
+# few minutes ahead is "just now", not "in the future".
+_SKEW = timedelta(minutes=5)
 
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]", "::1")
 
@@ -106,7 +115,7 @@ def create_app(control: ControlPlane, allowed_hosts: Iterable[str] = LOCAL_HOSTS
             "task.html",
             view=view,
             task=found,
-            body_html=_render_markdown(strip_thread(found.body)),
+            body_html=_render_markdown(_without_title(strip_thread(found.body))),
             entries=found.conversation,
             question=found.open_question,
             queue_ops=QUEUE_OPS,
@@ -210,6 +219,10 @@ def _render_markdown(text: str) -> str:
     return _markdown.render(text)
 
 
+def _without_title(body: str) -> str:
+    return _LEADING_H1_RE.sub("", body, count=1)
+
+
 def _ago(value) -> str:
     """``3h ago`` from a datetime, a date or an ISO stamp; the raw text if it is none of those.
 
@@ -219,7 +232,10 @@ def _ago(value) -> str:
     if isinstance(value, datetime):
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
-        return describe_age_phrase(value)
+        now = datetime.now(timezone.utc)
+        if now < value <= now + _SKEW:
+            value = now
+        return describe_age_phrase(value, now)
     if isinstance(value, date):
         return describe_age_phrase(datetime(value.year, value.month, value.day, tzinfo=timezone.utc))
     if isinstance(value, str):
@@ -230,7 +246,5 @@ def _ago(value) -> str:
             parsed = datetime.fromisoformat(stamp)
         except ValueError:
             return value
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return describe_age_phrase(parsed)
+        return _ago(parsed)
     return "unknown"

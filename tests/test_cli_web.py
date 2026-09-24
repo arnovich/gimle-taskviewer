@@ -11,6 +11,12 @@ from task_viewer.web import cli
 from helpers import git, init_repo
 
 
+@pytest.fixture(autouse=True)
+def no_real_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The developer's own ~/.config/tv/web.toml must never leak into a test."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+
 @pytest.fixture
 def served(monkeypatch: pytest.MonkeyPatch):
     """Capture what would have been served instead of starting uvicorn."""
@@ -36,8 +42,7 @@ def origin(tmp_path: Path) -> Path:
     return bare
 
 
-def test_no_repositories_is_a_usage_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, served) -> None:
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+def test_no_repositories_is_a_usage_error(capsys, served) -> None:
     assert cli.main([]) == 2
     assert "no repositories" in capsys.readouterr().err
     assert served == []
