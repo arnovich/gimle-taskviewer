@@ -21,18 +21,33 @@
 </table>
 {% endif %}
 
-{% if attention.ready %}
-<h2 id="ready">Ready to merge <span class="count">{{ attention.ready|length }}</span></h2>
-<p class="lede">Closed tasks whose branch is still on the remote: a pull request waiting for you, or a branch nobody deleted after merging.</p>
-<table id="ready-list">
-  <thead><tr><th>Repo</th><th>Task</th><th>Branch</th><th class="num">Last commit</th></tr></thead>
+{% if attention.pulls %}
+<h2 id="pulls">Pull requests to review <span class="count">{{ attention.pulls|length }}</span></h2>
+<table id="pulls-list">
+  <thead><tr><th>Repo</th><th>Pull request</th><th>Author</th><th>Checks</th><th class="num">Updated</th></tr></thead>
   <tbody>
-  {% for r in attention.ready %}
-  <tr><td class="dim">{{ r.repo }}</td><td><a href="{{ task_url(r.repo, r.task.task_id) }}">{{ r.task.title }}</a></td><td><code>{{ r.branch }}</code></td><td class="num dim">{{ r.since|ago }}</td></tr>
+  {% for p in attention.pulls %}
+  <tr>
+    <td class="dim">{{ p.repo }}</td>
+    <td>{% if p.pull.url %}<a href="{{ p.pull.url }}">#{{ p.pull.number }}</a>{% else %}#{{ p.pull.number }}{% endif %} {{ p.pull.title }}<br><span class="branch mono muted">{{ p.pull.branch }}</span>{% if p.task %} <span class="muted">for</span> <a href="{{ task_url(p.repo, p.task.task_id) }}">{{ p.task.title }}</a>{% endif %}</td>
+    <td><code>{{ p.pull.author }}</code></td>
+    <td><span class="checks {{ p.pull.checks }}">{% if p.pull.checks == "none" %}no checks{% else %}{{ p.pull.checks }} {{ p.pull.checks_done }}/{{ p.pull.checks_total }}{% endif %}</span>{% if p.pull.mergeable == "CONFLICTING" %}<br><span class="warn">conflicts with main</span>{% endif %}{% if p.pull.review == "CHANGES_REQUESTED" %}<br><span class="warn">changes requested</span>{% elif p.pull.review == "APPROVED" %}<br><span class="muted">approved</span>{% endif %}</td>
+    <td class="num dim">{{ p.pull.updated|ago }}</td>
+  </tr>
   {% endfor %}
   </tbody>
 </table>
 {% endif %}
+{% if attention.theirs %}
+<h2 id="theirs">Pull requests waiting on an agent <span class="count">{{ attention.theirs|length }}</span></h2>
+<p class="lede">Drafts, and pull requests where changes were requested. Not counted above: the next move is theirs.</p>
+<table id="theirs-list"><tbody>
+{% for p in attention.theirs %}
+<tr><td class="dim">{{ p.repo }}</td><td>{% if p.pull.url %}<a href="{{ p.pull.url }}">#{{ p.pull.number }}</a>{% else %}#{{ p.pull.number }}{% endif %} {{ p.pull.title }}{% if p.pull.draft %} <span class="tag">draft</span>{% endif %}{% if p.pull.review == "CHANGES_REQUESTED" %} <span class="tag">changes requested</span>{% endif %}{% if p.task %}<br><span class="muted">for</span> <a href="{{ task_url(p.repo, p.task.task_id) }}">{{ p.task.title }}</a>{% endif %}</td><td><code>{{ p.pull.author }}</code></td><td class="num dim">{{ p.pull.updated|ago }}</td></tr>
+{% endfor %}
+</tbody></table>
+{% endif %}
+{% if attention.unknown %}<p class="warn">GitHub could not be asked about {{ attention.unknown|join(", ") }}, so pull requests there are not shown.</p>{% endif %}
 
 {% if attention.gave_up %}
 <h2 id="gave-up">Given up on <span class="count">{{ attention.gave_up|length }}</span></h2>
@@ -76,4 +91,17 @@
   </tbody>
 </table>
 {% else %}<p class="empty">None open.</p>{% endif %}
+
+{% if attention.strays %}
+<h2 id="strays">Branches without a pull request <span class="count">{{ attention.strays|length }}</span></h2>
+<p class="lede">Closed tasks whose branch is still on the remote and has no open pull request: a merged branch nobody deleted, or work that was never proposed. Housekeeping, not counted above.</p>
+<table id="strays-list">
+  <thead><tr><th>Repo</th><th>Task</th><th>Branch</th><th class="num">Last commit</th></tr></thead>
+  <tbody>
+  {% for s in attention.strays %}
+  <tr><td class="dim">{{ s.repo }}</td><td><a href="{{ task_url(s.repo, s.task.task_id) }}">{{ s.task.title }}</a></td><td><code>{{ s.branch }}</code></td><td class="num dim">{{ s.since|ago }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 {% endblock %}

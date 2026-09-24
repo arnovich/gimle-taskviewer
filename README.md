@@ -386,9 +386,10 @@ until you delete that folder. `--repo URL` adds a repo for one run, on top
 of the file's list, which is handy for trying a repo before committing it
 to the config.
 
-The dashboard shows **who is waiting on you**, **what is claimed and by
-whom**, and each repo's queue; a task page shows the body, the thread, and a
-reply form. Who asked is read from the handle: an agent's has a `/` in it,
+The dashboard shows **who is waiting on you** — questions, open pull requests
+with their checks — **what is claimed and by whom**, **what CI is doing**, and
+each repo's queue; a task page shows the body, the thread, and a reply form.
+Pull requests and runs come from `gh`, with the login the machine already has. Who asked is read from the handle: an agent's has a `/` in it,
 yours does not. It binds to localhost, checks that requests really come from
 this machine and this origin, and has no login yet. `docs/control-plane.md`
 has the design and what comes next.

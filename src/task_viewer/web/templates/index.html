@@ -23,16 +23,24 @@
 </table>
 {% endif %}
 
-{% if attention.ready %}
-<details>
-  <summary><span class="n">{{ attention.ready|length }}</span> {{ "branch" if attention.ready|length == 1 else "branches" }} ready to merge <span class="hint">closed tasks whose branch is still on the remote</span></summary>
-  <div class="inner"><table id="ready-list"><tbody>
-  {% for r in attention.ready %}
-  <tr><td class="dim">{{ r.repo }}</td><td><a href="{{ task_url(r.repo, r.task.task_id) }}">{{ r.task.title }}</a></td><td><code>{{ r.branch }}</code></td><td class="num dim">{{ r.since|ago }}</td></tr>
+{% if attention.pulls %}
+<h3>Pull requests to review <span class="count">{{ attention.pulls|length }}</span></h3>
+<table id="pulls-list">
+  <thead><tr><th>Repo</th><th>Pull request</th><th>Checks</th><th class="num">Updated</th></tr></thead>
+  <tbody>
+  {% for p in attention.pulls[:8] %}
+  <tr>
+    <td class="dim">{{ p.repo }}</td>
+    <td>{% if p.pull.url %}<a href="{{ p.pull.url }}">#{{ p.pull.number }}</a>{% else %}#{{ p.pull.number }}{% endif %} {{ p.pull.title }}{% if p.task %}<br><span class="muted">for</span> <a href="{{ task_url(p.repo, p.task.task_id) }}">{{ p.task.title }}</a>{% endif %}</td>
+    <td><span class="checks {{ p.pull.checks }}">{% if p.pull.checks == "none" %}no checks{% else %}{{ p.pull.checks }} {{ p.pull.checks_done }}/{{ p.pull.checks_total }}{% endif %}</span>{% if p.pull.mergeable == "CONFLICTING" %}<br><span class="warn">conflicts</span>{% endif %}{% if p.pull.review == "CHANGES_REQUESTED" %}<br><span class="warn">changes requested</span>{% elif p.pull.review == "APPROVED" %}<br><span class="muted">approved</span>{% endif %}</td>
+    <td class="num dim">{{ p.pull.updated|ago }}</td>
+  </tr>
   {% endfor %}
-  </tbody></table></div>
-</details>
+  </tbody>
+</table>
+{% if attention.pulls|length > 8 %}<p class="muted"><a href="/needs-you">All {{ attention.pulls|length }} pull requests</a></p>{% endif %}
 {% endif %}
+{% if attention.theirs %}<p class="muted" id="theirs">{{ attention.theirs|length }} more open {{ "pull request is" if attention.theirs|length == 1 else "pull requests are" }} a draft or waiting on an agent's changes — <a href="/needs-you#theirs">see them</a>.</p>{% endif %}
 {% if attention.gave_up %}
 <details>
   <summary><span class="n">{{ attention.gave_up|length }}</span> given up on <span class="hint">two failed attempts each</span></summary>
@@ -65,7 +73,8 @@
       <span class="seen">{% if a.stale %}<span class="flag">stale</span> {% endif %}seen {{ a.last_seen|ago if a.last_seen else "never" }}{% if a.last_commit %}, committed to <code>{{ a.last_branch }}</code> {{ a.last_commit|ago }}{% endif %}</span></div>
     <ul class="holds">
     {% for repo, t in a.holds %}
-      <li><span class="muted">{{ repo }}</span> <a href="{{ task_url(repo, t.task_id) }}">{{ t.title }}</a></li>
+      {% set pr = attention.pull_for(repo, t) %}
+      <li><span class="muted">{{ repo }}</span> <a href="{{ task_url(repo, t.task_id) }}">{{ t.title }}</a>{% if pr %} <a href="{{ pr.pull.url }}" class="checks {{ pr.pull.checks }}">#{{ pr.pull.number }}</a>{% endif %}</li>
     {% endfor %}
     </ul>
     {% if a.last_entry %}<p class="status">{{ a.last_entry.kind }} {{ a.last_entry.when|ago }}: {{ a.last_entry.text|truncate(120) }}</p>{% endif %}
@@ -88,6 +97,28 @@
 </ul>
 </section>
 </div>
+
+<h2 id="ci">CI <span class="count">{{ ci.summary }}</span></h2>
+{% if ci.unknown %}<p class="warn">GitHub could not be asked about {{ ci.unknown|join(", ") }}.</p>{% endif %}
+{% macro run_row(r) %}
+  <li class="{{ r.run.state }}">
+    <span class="state">{{ r.run.state }}</span>
+    <span><span class="muted">{{ r.repo }}</span> {% if r.run.url %}<a href="{{ r.run.url }}">{{ r.run.workflow }}</a>{% else %}{{ r.run.workflow }}{% endif %} <span class="branch">{{ r.run.branch }}</span>
+      {% if r.task %}<a href="{{ task_url(r.repo, r.task.task_id) }}">{{ r.task.title }}</a>{% else %}<span class="muted">{{ r.run.title|truncate(70) }}</span>{% endif %}
+      <span class="muted">{{ (r.run.updated or r.run.created)|ago }}</span></span>
+  </li>
+{% endmacro %}
+{% if ci.running or ci.failed %}
+<ul class="runs" id="ci-list">
+{% for r in ci.running + ci.failed %}{{ run_row(r) }}{% endfor %}
+</ul>
+{% endif %}
+{% if ci.queued %}
+<details>
+  <summary><span class="n">{{ ci.queued|length }}</span> queued <span class="hint">waiting for a runner, a slot or an approval</span></summary>
+  <div class="inner"><ul class="runs" id="ci-queued">{% for r in ci.queued %}{{ run_row(r) }}{% endfor %}</ul></div>
+</details>
+{% endif %}
 
 <h2 id="activity">Activity <span class="count">latest</span> <a class="more" href="/activity">Last 7 days</a></h2>
 {% if events %}

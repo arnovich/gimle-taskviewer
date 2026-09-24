@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from task_viewer.discovery import Task
+from task_viewer.github import Pull, Run, Snapshot
 from task_viewer.mirror import Mirror
 from task_viewer.web.app import _ago, _github_url, create_app
 from task_viewer.web.config import ConfigError, load_config, resolve_owner
@@ -64,8 +65,36 @@ def _origin(tmp_path: Path, name: str, files: dict[str, str], history=(), branch
     return bare
 
 
+NOW = datetime.now(timezone.utc)
+
+
+def _github(slug: str, branch: str | None = None) -> Snapshot:
+    """What GitHub would say: alpha has PRs and some runs, beta cannot be asked."""
+    if slug == "arnovich/alpha":
+        return Snapshot(
+            runs=[
+                Run(1, "CPU tests", "task 003: plan", "in_progress", "", "task/003_busy", "push", NOW, NOW, "https://github.com/arnovich/alpha/actions/runs/1"),
+                Run(2, "Lint", "Seed", "queued", "", "main", "push", NOW, NOW, "https://github.com/arnovich/alpha/actions/runs/2"),
+                Run(3, "Lint", "Seed", "completed", "failure", "main", "push", NOW, NOW, "https://github.com/arnovich/alpha/actions/runs/3"),
+            ],
+            pulls=[
+                Pull(7, "task 003: busy work", "task/003_busy", "https://github.com/arnovich/alpha/pull/7", False, "claude", "", "MERGEABLE", "pending", 1, 2, NOW, NOW),
+                Pull(8, "WIP: something", "feat/wip", "https://github.com/arnovich/alpha/pull/8", True, "claude", "", "MERGEABLE", "none", 0, 0, NOW, NOW),
+            ],
+            checked=NOW,
+        )
+    return Snapshot(runs_error="gh: not logged in", pulls_error="gh: not logged in", checked=NOW)
+
+
 @pytest.fixture
-def world(tmp_path: Path):
+def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # The origins are local paths; pretend they are GitHub so the gh layer is exercised.
+    monkeypatch.setattr("task_viewer.web.control.slug_of", lambda url: f"arnovich/{Path(url).stem}")
+    calls: list[str] = []
+
+    def counted(slug: str, branch: str | None = None) -> Snapshot:
+        calls.append(slug)
+        return _github(slug, branch)
     alpha = _origin(
         tmp_path,
         "alpha",
@@ -123,10 +152,10 @@ def world(tmp_path: Path):
         Mirror(str(alpha), tmp_path / "data" / "alpha"),
         Mirror(str(beta), tmp_path / "data" / "beta"),
     ]
-    control = ControlPlane(mirrors, owner="erikarne", max_age=3600)
+    control = ControlPlane(mirrors, owner="erikarne", max_age=3600, github=counted)
     app = create_app(control, allowed_hosts=["testserver"])
     client = TestClient(app, follow_redirects=False)
-    return {"alpha": alpha, "beta": beta, "client": client, "control": control, "tmp": tmp_path}
+    return {"alpha": alpha, "beta": beta, "client": client, "control": control, "tmp": tmp_path, "calls": calls}
 
 
 def _show(origin: Path, rel: str) -> str:
@@ -153,14 +182,19 @@ def _section(page: str, anchor: str) -> str:
 def test_the_dashboard_says_what_is_your_move(world) -> None:
     page = world["client"].get("/").text
     needs_you = _section(page, "needs-you")
-    # 2 questions + 1 branch ready to merge + 1 given up + 1 ambiguous number.
+    # 2 questions + 1 pull request + 1 given up + 1 ambiguous number.
     assert 'class="number">5<' in needs_you
-    assert "2 questions, 1 branch ready to merge, 1 task given up on, 1 ambiguous number" in needs_you
+    assert "2 questions, 1 pull request to review, 1 task given up on, 1 ambiguous number" in needs_you
     assert ">Asked<" in needs_you and ">Dir task<" in needs_you and "claude/abc" in needs_you
     assert ">Mine<" not in needs_you  # the owner asked that one; it is on /needs-you
+    # The pull request, linked to its task, with its checks. The draft is the agent's move.
+    pulls = needs_you.split('id="pulls-list"')[1].split("</table>")[0]
+    assert "#7" in pulls and ">Busy<" in pulls and "pending 1/2" in pulls
+    assert "#8" not in pulls and 'id="theirs"' in needs_you
+    # A closed task's branch without a PR is not "ready to merge" any more.
+    assert "task/004_done" not in needs_you
     # The other buckets are folded, but present.
     assert "<details>" in needs_you
-    assert ">Done<" in needs_you and "task/004_done" in needs_you
     assert ">Stuck<" in needs_you
     assert ">Twin A<" in needs_you and ">Twin B<" in needs_you
 
@@ -168,7 +202,11 @@ def test_the_dashboard_says_what_is_your_move(world) -> None:
 def test_the_needs_you_page_has_every_bucket_in_full(world) -> None:
     page = world["client"].get("/needs-you").text
     assert ">Asked<" in _section(page, "questions")
-    assert ">Done<" in _section(page, "ready")
+    assert "#7" in _section(page, "pulls") and "task/003_busy" in _section(page, "pulls")
+    assert "#8" in _section(page, "theirs") and ">draft<" in _section(page, "theirs")
+    assert "GitHub could not be asked about beta" in page
+    strays = _section(page, "strays")
+    assert ">Done<" in strays and "task/004_done" in strays  # listed as housekeeping, not counted
     assert ">Stuck<" in _section(page, "gave-up")
     assert ">Twin A<" in _section(page, "ambiguous")
     waiting_on_agent = _section(page, "needs-agent")
@@ -212,6 +250,62 @@ def test_the_dashboard_names_the_next_pick_and_the_repo_page_explains_the_rest(w
     assert 'class="next"' in rows[3] and ">next<" in rows[3]
 
 
+def test_the_dashboard_shows_ci_and_the_sidebar_shows_health(world) -> None:
+    page = world["client"].get("/").text
+    ci = _section(page, "ci")
+    assert "1 run running, 1 run queued, 1 failure" in ci
+    rows = [line for line in ci.splitlines() if "<li class=" in line]
+    assert [r.split('class="')[1].split('"')[0] for r in rows] == ["running", "failed", "queued"]
+    assert 'id="ci-queued"' in ci  # queued runs are folded away
+    assert ">Busy<" in ci  # the running run belongs to task 003
+    assert "GitHub could not be asked about beta" in ci
+    side = page.split('<nav class="side">')[1].split("</nav>")[0]
+    alpha_row = side.split('href="/r/alpha"')[1].split("</a>")[0]
+    assert 'class="ci-dot failing"' in alpha_row  # Lint failed on main
+    beta_row = side.split('href="/r/beta"')[1].split("</a>")[0]
+    assert 'class="ci-dot "' in beta_row and 'class="warn" title="GitHub: runs: gh: not logged in' in beta_row
+    # The agent's card links the PR of the task it holds.
+    running = _section(page, "in-progress")
+    assert 'href="https://github.com/arnovich/alpha/pull/7" class="checks pending">#7</a>' in running
+
+    repo = world["client"].get("/r/alpha").text
+    assert "#7" in _section(repo, "pulls") and "#8" in _section(repo, "pulls")
+    assert ">running<" in _section(repo, "ci") and ">failed<" in _section(repo, "ci")
+    assert "GitHub could not be asked" in world["client"].get("/r/beta").text
+
+    task = world["client"].get("/r/alpha/t/003-busy").text
+    assert 'id="task-pull"' in task and "#7" in task and "pending 1/2" in task
+    assert 'id="task-pull"' not in world["client"].get("/r/alpha/t/001-asked").text
+
+
+def test_github_is_asked_on_its_own_cadence_and_never_takes_the_pages_down(world, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, calls, control = world["client"], world["calls"], world["control"]
+    client.get("/")
+    assert sorted(calls) == ["arnovich/alpha", "arnovich/beta"]  # once per repo on first load
+    client.get("/"); client.get("/r/alpha")
+    assert len(calls) == 2  # fresh: not asked again
+    client.post("/refresh")
+    assert len(calls) == 4  # Refresh forces it
+    # An errored repo is retried only after the backoff, a healthy one after its max age.
+    from datetime import timedelta
+    from task_viewer.web import control as control_module
+    control._snapshots["alpha"].checked = NOW - control_module.GITHUB_MAX_AGE - timedelta(seconds=1)
+    control._snapshots["beta"].checked = NOW - control_module.GITHUB_MAX_AGE - timedelta(seconds=1)
+    client.get("/")
+    assert calls[4:] == ["arnovich/alpha"]  # beta (errored) waits for the longer backoff
+    control._snapshots["beta"].checked = NOW - control_module.GITHUB_BACKOFF - timedelta(seconds=1)
+    client.get("/")
+    assert calls[5:] == ["arnovich/beta"]
+
+    def explode(slug, branch=None):
+        raise RuntimeError("gh went away")
+
+    control._github = explode
+    client.post("/refresh")
+    page = client.get("/")
+    assert page.status_code == 200 and "could not ask GitHub: gh went away" in page.text
+
+
 def test_the_dashboard_and_the_activity_page_list_what_happened(world) -> None:
     client = world["client"]
     activity = _section(client.get("/").text, "activity")
@@ -238,6 +332,36 @@ def test_the_repo_page_lists_active_tasks_and_can_show_closed(world) -> None:
     assert "Done" in client.get("/r/alpha?closed=1").text
     assert client.get("/r/nope").status_code == 404
     assert client.get("/r/alpha/t/999-missing").status_code == 404
+
+
+def test_the_repo_page_sorts_and_searches(world) -> None:
+    client = world["client"]
+
+    def titles(url: str) -> list[str]:
+        table = client.get(url).text.split('id="tasks-list"')[1].split("</table>")[0]
+        return [row.split("</a>")[0].rsplit(">", 1)[1] for row in table.split("<tr>")[2:] if "</a>" in row]
+
+    by_number = titles("/r/alpha")
+    assert by_number[:3] == ["Asked", "Queued", "Busy"]
+    assert titles("/r/alpha?sort=number&dir=desc") == list(reversed(by_number))
+    by_title = titles("/r/alpha?sort=title")
+    assert by_title == sorted(by_title, key=str.lower)
+    assert titles("/r/alpha?sort=title&dir=desc") == list(reversed(by_title))
+    # Priority: high before medium before low; the fixture is all medium, so the number breaks ties.
+    assert titles("/r/alpha?sort=priority") == by_number
+    # Created: tasks the log has seen first; the fixture's history names 003 and 004 only.
+    created = titles("/r/alpha?sort=created")
+    assert created[0] == "Busy" and set(created) == set(by_number)
+    assert titles("/r/alpha?sort=created&dir=desc")[0] == "Busy"
+    # Search looks at the title, the labels and the body.
+    assert titles("/r/alpha?q=stuck") == ["Stuck"]
+    assert titles("/r/alpha?q=TWIN") == ["Twin A", "Twin B"]
+    assert titles("/r/alpha?q=tests+hang") == ["Stuck"]  # body text
+    assert titles("/r/alpha?q=nothing-like-this") == []
+    assert "Nothing matches" in client.get("/r/alpha?q=nothing-like-this").text
+    # An unknown sort falls back rather than failing; closed tasks come along when asked.
+    assert titles("/r/alpha?sort=bogus") == by_number
+    assert "Done" in titles("/r/alpha?closed=1&q=done")
 
 
 def test_the_task_page_renders_the_body_and_the_thread(world) -> None:
@@ -364,7 +488,7 @@ def test_an_unreachable_repo_is_shown_not_fatal(world, tmp_path: Path) -> None:
     page = world["client"].get("/r/beta").text
     assert "could not reach the remote" in page
     assert "Mine" in page  # the last known state is still served
-    assert 'class="warn" title="could not reach the remote"' in page  # the sidebar marks it
+    assert 'class="warn" title="could not reach the remote' in page  # the sidebar marks it
 
 
 def test_a_repo_that_cannot_be_cloned_is_shown_and_refuses_writes(tmp_path: Path) -> None:

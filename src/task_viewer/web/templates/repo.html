@@ -7,6 +7,26 @@
 {% if view.error %}<p class="bad">{{ view.error }}</p>{% endif %}
 {% if view.refresh and view.refresh.detail %}<p class="warn">{{ view.refresh.detail }}</p>{% endif %}
 
+{% if attention.pulls or attention.theirs %}
+<h2 id="pulls">Pull requests <span class="count">{{ attention.pulls|length + attention.theirs|length }}</span></h2>
+<table id="pulls-list"><tbody>
+{% for p in attention.pulls + attention.theirs %}
+<tr><td>{% if p.pull.url %}<a href="{{ p.pull.url }}">#{{ p.pull.number }}</a>{% else %}#{{ p.pull.number }}{% endif %} {{ p.pull.title }}{% if p.pull.draft %} <span class="tag">draft</span>{% endif %}{% if p.pull.review == "CHANGES_REQUESTED" %} <span class="tag">changes requested</span>{% endif %}{% if p.task %} <span class="muted">for</span> <a href="{{ task_url(view.name, p.task.task_id) }}">{{ p.task.title }}</a>{% endif %}</td><td><span class="checks {{ p.pull.checks }}">{% if p.pull.checks == "none" %}no checks{% else %}{{ p.pull.checks }} {{ p.pull.checks_done }}/{{ p.pull.checks_total }}{% endif %}</span></td><td class="num dim">{{ p.pull.updated|ago }}</td></tr>
+{% endfor %}
+</tbody></table>
+{% endif %}
+
+<h2 id="ci">CI <span class="count">{{ ci.summary }}</span></h2>
+{% if view.github is none %}<p class="empty">Not a GitHub repository.</p>
+{% elif not view.github.runs_ok %}<p class="warn">GitHub could not be asked: {{ view.github.error }}</p>
+{% elif runs %}
+<ul class="runs" id="runs-list">
+{% for run in runs %}
+  <li class="{{ run.state }}"><span class="state">{{ run.state }}</span><span>{% if run.url %}<a href="{{ run.url }}">{{ run.workflow }}</a>{% else %}{{ run.workflow }}{% endif %} <span class="branch">{{ run.branch }}</span> <span class="muted">{{ run.title|truncate(80) }}</span> <span class="muted">{{ (run.updated or run.created)|ago }}</span></span></li>
+{% endfor %}
+</ul>
+{% else %}<p class="empty">No workflow runs.</p>{% endif %}
+
 <h2 id="up-next">Queue <span class="count">as grind reads it</span></h2>
 <div class="queue">
 {% if picks %}
@@ -21,10 +41,22 @@
 {% else %}<p class="empty">Nothing ranked. Rank tasks in <code>tv</code> or on a task page.</p>{% endif %}
 </div>
 
-<h2>Tasks <span class="count">{{ tasks|length }}</span>
-  <span class="more">{% if closed %}<a href="{{ repo_url(view.name) }}">Hide closed</a>{% else %}<a href="{{ repo_url(view.name) }}?closed=1">Show closed</a>{% endif %}</span></h2>
-<table>
-  <thead><tr><th></th><th>#</th><th>Next</th><th>Title</th><th>Priority</th><th>Labels</th></tr></thead>
+{% macro sort_link(key, label) -%}
+  {%- set flip = "desc" if (sort == key and not descending) else "asc" -%}
+  <a class="sort{% if sort == key %} here{% endif %}" href="{{ repo_url(view.name) }}?sort={{ key }}&amp;dir={{ flip }}{% if closed %}&amp;closed=1{% endif %}{% if q %}&amp;q={{ q|urlencode }}{% endif %}">{{ label }}{% if sort == key %} {{ "▾" if descending else "▴" }}{% endif %}</a>
+{%- endmacro %}
+<h2 id="tasks">Tasks <span class="count">{{ tasks|length }}{% if q %} matching{% endif %}</span>
+  <span class="more">{% if closed %}<a href="{{ repo_url(view.name) }}{% if q %}?q={{ q|urlencode }}{% endif %}">Hide closed</a>{% else %}<a href="{{ repo_url(view.name) }}?closed=1{% if q %}&amp;q={{ q|urlencode }}{% endif %}">Show closed</a>{% endif %}</span></h2>
+<form class="search" method="get" action="{{ repo_url(view.name) }}">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search title, labels and text" aria-label="Search tasks">
+  {% if sort != "number" %}<input type="hidden" name="sort" value="{{ sort }}">{% endif %}
+  {% if descending %}<input type="hidden" name="dir" value="desc">{% endif %}
+  {% if closed %}<input type="hidden" name="closed" value="1">{% endif %}
+  <button type="submit" class="small">Search</button>
+  {% if q %}<a class="muted" href="{{ repo_url(view.name) }}{% if closed %}?closed=1{% endif %}">Clear</a>{% endif %}
+</form>
+<table id="tasks-list">
+  <thead><tr><th>{{ sort_link("state", "") }}</th><th>{{ sort_link("number", "#") }}</th><th>Next</th><th>{{ sort_link("title", "Title") }}</th><th>{{ sort_link("priority", "Priority") }}</th><th>Labels</th><th class="num">{{ sort_link("created", "Created") }}</th></tr></thead>
   <tbody>
   {% for t in tasks %}
   <tr>
@@ -34,7 +66,10 @@
     <td>{% if t.open_question %}<span class="ask" title="waiting for an answer">?</span> {% endif %}<a href="{{ task_url(view.name, t.task_id) }}">{{ t.title }}</a></td>
     <td class="dim">{{ t.priority or "" }}</td>
     <td>{% for label in t.labels %}<span class="tag">{{ label }}</span> {% endfor %}</td>
+    <td class="num dim">{% if t.task_id in created %}{{ created[t.task_id]|ago }}{% endif %}</td>
   </tr>
+  {% else %}
+  <tr><td colspan="7" class="dim">{% if q %}Nothing matches “{{ q }}”.{% else %}No tasks.{% endif %}</td></tr>
   {% endfor %}
   </tbody>
 </table>
