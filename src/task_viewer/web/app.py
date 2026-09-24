@@ -28,8 +28,20 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from ..conversation import KINDS, strip_thread
 from ..discovery import Task
 from ..git_info import describe_age_phrase
-from .control import QUEUE_OPS, ControlError, ControlPlane, InvalidInput
-from .director import STALE_AFTER, agents, attention, feed, timeline, up_next
+from .control import QUEUE_OPS, ControlError, ControlPlane, InvalidInput, RepoView
+from .director import (
+    FEED_LIMIT,
+    STALE_AFTER,
+    agents,
+    attention,
+    feed,
+    next_pick,
+    timeline,
+    up_next,
+)
+
+# The dashboard shows this many events; /activity shows them all.
+DASHBOARD_EVENTS = 12
 
 _TEMPLATES = Path(__file__).parent / "templates"
 
@@ -76,46 +88,73 @@ def create_app(control: ControlPlane, allowed_hosts: Iterable[str] = LOCAL_HOSTS
     templates.env.globals["repo_url"] = _repo_url
     templates.env.globals["task_url"] = _task_url
     templates.env.globals["github_url"] = _github_url
+    templates.env.globals["next_pick"] = next_pick
     templates.env.globals["stale_after"] = f"{int(STALE_AFTER.total_seconds() // 3600)}h"
 
-    def page(request: Request, name: str, **context) -> HTMLResponse:
-        return templates.TemplateResponse(request, name, context)
+    def page(request: Request, name: str, views: list[RepoView], **context) -> HTMLResponse:
+        """Render with the sidebar's data, which every page carries."""
+        return templates.TemplateResponse(request, name, {"nav": _nav(views), **context})
+
+    def load() -> list[RepoView]:
+        control.refresh()
+        return control.overview()
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request) -> HTMLResponse:
-        control.refresh()
-        views = control.overview()
+        views = load()
         facts = [v.facts for v in views]
         return page(
             request,
             "index.html",
-            views=views,
+            views,
             attention=attention(facts),
             agents=agents(facts),
             picks=[(v.name, up_next(v.facts)) for v in views],
-            events=feed(facts),
+            events=feed(facts)[:DASHBOARD_EVENTS],
+        )
+
+    @app.get("/needs-you", response_class=HTMLResponse)
+    def needs_you(request: Request) -> HTMLResponse:
+        views = load()
+        return page(request, "needs_you.html", views, attention=attention([v.facts for v in views]))
+
+    @app.get("/activity", response_class=HTMLResponse)
+    def activity(request: Request, repo: str | None = None) -> HTMLResponse:
+        views = load()
+        chosen = [v for v in views if repo is None or v.name == repo]
+        if repo is not None and not chosen:
+            raise HTTPException(404, f"no repository called {repo!r}")
+        return page(
+            request,
+            "activity.html",
+            views,
+            events=feed([v.facts for v in chosen], limit=FEED_LIMIT * 4),
+            repo=repo,
         )
 
     @app.get("/r/{repo}", response_class=HTMLResponse)
     def repo(request: Request, repo: str, closed: bool = False) -> HTMLResponse:
-        control.refresh()
-        view = _or_404(lambda: control.repo(repo))
+        views = load()
+        view = _or_404(lambda: _find(views, repo))
         return page(
             request,
             "repo.html",
+            views,
             view=view,
             tasks=view.tasks if closed else view.active,
             closed=closed,
+            picks=up_next(view.facts),
         )
 
     @app.get("/r/{repo}/t/{task_id}", response_class=HTMLResponse)
     def task(request: Request, repo: str, task_id: str) -> HTMLResponse:
-        control.refresh()
-        view = _or_404(lambda: control.repo(repo))
+        views = load()
+        view = _or_404(lambda: _find(views, repo))
         found = _or_404(lambda: control.task(repo, task_id))
         return page(
             request,
             "task.html",
+            views,
             view=view,
             task=found,
             body_html=_render_markdown(_without_title(strip_thread(found.body))),
@@ -149,6 +188,33 @@ def create_app(control: ControlPlane, allowed_hosts: Iterable[str] = LOCAL_HOSTS
         return RedirectResponse(_task_url(repo, task_id), status_code=303)
 
     return app
+
+
+def _find(views: list[RepoView], name: str) -> RepoView:
+    for view in views:
+        if view.name == name:
+            return view
+    raise ControlError(f"no repository called {name!r}")
+
+
+def _nav(views: list[RepoView]) -> dict:
+    """What the sidebar shows on every page: the repos, and where you are needed."""
+    rows = []
+    total = 0
+    checked = None
+    for view in views:
+        needs = attention([view.facts]).count
+        total += needs
+        rows.append({
+            "name": view.name,
+            "counts": view.counts,
+            "needs": needs,
+            "error": view.error,
+            "detail": view.refresh.detail if view.refresh else "",
+        })
+        if view.refresh and view.refresh.at and (checked is None or view.refresh.at > checked):
+            checked = view.refresh.at
+    return {"repos": rows, "needs": total, "checked": checked}
 
 
 def _cross_site(request: Request) -> str:

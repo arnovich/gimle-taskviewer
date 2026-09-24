@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Needs you{% endblock %}
+{% block content %}
+<h1>Needs you</h1>
+<p class="lede">{% if attention.count %}{{ attention.summary }}.{% else %}Nothing is waiting on you.{% endif %}</p>
+
+{% if attention.questions %}
+<h2 id="questions">Questions for you <span class="count">{{ attention.questions|length }}</span></h2>
+<table id="needs-you-list">
+  <thead><tr><th>Repo</th><th>Question</th><th>Asked by</th><th class="num">When</th></tr></thead>
+  <tbody>
+  {% for w in attention.questions %}
+  <tr>
+    <td class="dim">{{ w.repo }}</td>
+    <td><a href="{{ task_url(w.repo, w.task.task_id) }}">{{ w.task.title }}</a><br><span class="muted">{{ w.question.text|truncate(200) }}</span></td>
+    <td><code>{{ w.question.author or "?" }}</code></td>
+    <td class="num dim">{{ w.question.when|ago if w.question.when else w.question.at }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if attention.ready %}
+<h2 id="ready">Ready to merge <span class="count">{{ attention.ready|length }}</span></h2>
+<p class="lede">Closed tasks whose branch is still on the remote: a pull request waiting for you, or a branch nobody deleted after merging.</p>
+<table id="ready-list">
+  <thead><tr><th>Repo</th><th>Task</th><th>Branch</th><th class="num">Last commit</th></tr></thead>
+  <tbody>
+  {% for r in attention.ready %}
+  <tr><td class="dim">{{ r.repo }}</td><td><a href="{{ task_url(r.repo, r.task.task_id) }}">{{ r.task.title }}</a></td><td><code>{{ r.branch }}</code></td><td class="num dim">{{ r.since|ago }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if attention.gave_up %}
+<h2 id="gave-up">Given up on <span class="count">{{ attention.gave_up|length }}</span></h2>
+<p class="lede">Two failed attempts and grind leaves a task alone. These need a decision or a better spec.</p>
+<table id="gave-up-list">
+  <thead><tr><th>Repo</th><th>Task</th><th class="num">Attempts</th></tr></thead>
+  <tbody>
+  {% for g in attention.gave_up %}
+  <tr><td class="dim">{{ g.repo }}</td><td><a href="{{ task_url(g.repo, g.task.task_id) }}">{{ g.task.title }}</a></td><td class="num dim">{{ g.attempts }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if attention.ambiguous %}
+<h2 id="ambiguous">Ambiguous numbers <span class="count">{{ attention.ambiguous|length }}</span></h2>
+<p class="lede">Two tasks share a number, so no agent will touch either. Renumber one.</p>
+<table id="ambiguous-list">
+  <tbody>
+  {% for a in attention.ambiguous %}
+  <tr><td class="dim">{{ a.repo }}</td><td class="id">{{ a.number }}</td><td>{% for t in a.tasks %}<a href="{{ task_url(a.repo, t.task_id) }}">{{ t.title }}</a>{% if not loop.last %}<br>{% endif %}{% endfor %}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2 id="needs-agent">Waiting on an agent <span class="count">{{ attention.asked|length }}</span></h2>
+{% if attention.asked %}
+<p class="lede">Questions you asked that no agent has answered yet.</p>
+<table id="needs-agent-list">
+  <thead><tr><th>Repo</th><th>Task</th><th>State</th><th class="num">When</th></tr></thead>
+  <tbody>
+  {% for w in attention.asked %}
+  <tr>
+    <td class="dim">{{ w.repo }}</td>
+    <td><a href="{{ task_url(w.repo, w.task.task_id) }}">{{ w.task.title }}</a></td>
+    <td class="dim">{{ w.task.state }}</td>
+    <td class="num dim">{{ w.question.when|ago if w.question.when else w.question.at }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="empty">None open.</p>{% endif %}
+{% endblock %}

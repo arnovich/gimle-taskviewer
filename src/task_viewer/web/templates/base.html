@@ -22,6 +22,7 @@
     --danger: #b3261e;
     --sans: "Adwaita Sans", "Inter", "Noto Sans", system-ui, sans-serif;
     --mono: "JetBrainsMono Nerd Font", "JetBrains Mono", "Adwaita Mono", ui-monospace, monospace;
+    --side: 15rem;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -55,35 +56,62 @@
   code, .mono { font-family: var(--mono); font-size: .88em; }
   code { color: var(--fg); }
 
-  /* Chrome */
-  header.top {
-    display: flex; align-items: center; gap: 1rem;
-    padding: .55rem 1.25rem;
-    border-bottom: 1px solid var(--line);
-    background: var(--surface);
+  /* Shell: a sidebar of repos, and the page. */
+  .shell { display: grid; grid-template-columns: var(--side) 1fr; min-height: 100vh; }
+  nav.side {
+    position: sticky; top: 0; height: 100vh; overflow: auto;
+    padding: .9rem 1rem; border-right: 1px solid var(--line); background: var(--surface);
+    display: flex; flex-direction: column; gap: .2rem; font-size: .93rem;
   }
-  header.top .brand { font-weight: 650; color: var(--fg); letter-spacing: -.01em; }
-  header.top .brand:hover { text-decoration: none; }
-  header.top .crumbs { color: var(--muted); }
-  header.top .crumbs a { color: var(--muted); }
-  header.top form { margin-left: auto; }
-  main { max-width: 68rem; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
+  nav.side .brand { font-weight: 650; color: var(--fg); letter-spacing: -.01em; font-size: 1.05rem; margin-bottom: .6rem; }
+  nav.side .brand:hover { text-decoration: none; }
+  nav.side .brand span { font-weight: 400; color: var(--muted); }
+  nav.side a.item { display: flex; justify-content: space-between; gap: .5rem; align-items: baseline; color: var(--fg); padding: .25rem .5rem; margin: 0 -.5rem; border-radius: 5px; }
+  nav.side a.item:hover { background: var(--bg); text-decoration: none; }
+  nav.side a.item.here { background: var(--bg); font-weight: 600; }
+  nav.side a.item .n { color: var(--muted); font-variant-numeric: tabular-nums; font-size: .85rem; }
+  nav.side a.item .needs { color: var(--amber); font-weight: 650; font-variant-numeric: tabular-nums; font-size: .85rem; }
+  nav.side .group { margin: .9rem 0 .2rem; font-size: .78rem; font-weight: 500; color: var(--muted); }
+  nav.side .repo .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  nav.side .repo.bad .name { color: var(--danger); }
+  nav.side .foot { margin-top: auto; padding-top: .9rem; display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; color: var(--muted); }
+  main { min-width: 0; max-width: 68rem; padding: 1.35rem 1.6rem 4rem; }
 
   h1 { font-size: 1.55rem; line-height: 1.2; font-weight: 650; letter-spacing: -.015em; margin: 0 0 .35rem; }
-  h2 { font-size: 1rem; font-weight: 650; margin: 2.2rem 0 .6rem; display: flex; align-items: baseline; gap: .5rem; }
+  h2 { font-size: 1rem; font-weight: 650; margin: 1.8rem 0 .5rem; display: flex; align-items: baseline; gap: .5rem; }
   h2 .count { font-weight: 500; color: var(--muted); }
-  h2:first-of-type { margin-top: .5rem; }
+  h2 .more { margin-left: auto; font-weight: 500; font-size: .85rem; }
+  h2:first-of-type, main > .hero:first-child { margin-top: 0; }
+  h3 { font-size: .95rem; font-weight: 600; margin: 1.2rem 0 .4rem; }
+  h3 + .lede { margin-top: -.2rem; }
   .muted { color: var(--muted); }
   .warn { color: var(--amber); }
   .bad { color: var(--danger); }
-  .lede { color: var(--muted); margin: 0 0 1.25rem; }
+  .lede { color: var(--muted); margin: 0 0 1rem; }
   .empty { color: var(--muted); margin: .25rem 0 0; }
 
   /* The one bold thing: how many turns are yours. */
-  .hero { display: flex; align-items: baseline; gap: .8rem; margin: .25rem 0 .75rem; }
-  .hero .number { font-size: 3.4rem; line-height: 1; font-weight: 650; letter-spacing: -.03em; color: var(--amber); }
+  .hero { display: flex; align-items: baseline; gap: .8rem; margin: 0 0 .6rem; }
+  .hero .number { font-size: 2.6rem; line-height: 1; font-weight: 650; letter-spacing: -.03em; color: var(--amber); }
   .hero .number.zero { color: var(--muted); }
-  .hero .caption { color: var(--muted); font-size: 1.05rem; }
+  .hero .caption { color: var(--muted); font-size: 1rem; }
+  .hero .more { margin-left: auto; font-size: .85rem; }
+
+  /* Folds: native, no script. */
+  details { border-top: 1px solid var(--line); }
+  details:last-of-type { border-bottom: 1px solid var(--line); }
+  details > summary { cursor: pointer; padding: .45rem 0; list-style: none; display: flex; gap: .6rem; align-items: baseline; }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::before { content: "▸"; color: var(--muted); font-size: .8rem; width: .9rem; }
+  details[open] > summary::before { content: "▾"; }
+  details > summary .n { font-weight: 650; color: var(--amber); font-variant-numeric: tabular-nums; }
+  details > summary .hint { color: var(--muted); font-size: .88rem; }
+  details > .inner { padding: 0 0 .8rem 1.5rem; }
+
+  /* Two columns on the dashboard where two things belong side by side. */
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem 2rem; }
+  .cols > * { min-width: 0; }
+  .cols h2 { margin-top: 1.4rem; }
 
   /* Tables: rules between rows, nothing else. */
   table { border-collapse: collapse; width: 100%; }
@@ -115,6 +143,7 @@
   button:disabled { cursor: default; color: var(--muted); border-color: var(--line); background: transparent; }
   button.primary { color: var(--bg); background: var(--fg); border-color: var(--fg); }
   button.primary:hover:not(:disabled) { opacity: .9; }
+  button.small { font-size: .82rem; padding: .22rem .6rem; }
   .actions { display: flex; flex-wrap: wrap; gap: .5rem; margin: .9rem 0 1.4rem; }
   .actions form { display: contents; }
   textarea {
@@ -171,25 +200,23 @@
   .entry .text > :first-child { margin-top: 0; }
   .entry .text > :last-child { margin-bottom: 0; }
   .entry .text pre { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: .6rem .8rem; overflow: auto; font-size: .85rem; }
-
-  h3 { font-size: .95rem; font-weight: 600; margin: 1.4rem 0 .4rem; }
-  h3 + .lede { margin-top: -.2rem; }
+  .event { padding: .1rem 0 .1rem 1rem; margin: .5rem 0; border-left: 3px solid transparent; font-size: .9rem; color: var(--muted); }
+  .event .kind { font-weight: 600; color: var(--fg); }
+  .event .who { font-family: var(--mono); font-size: .82rem; }
 
   /* Running now: one block per agent. */
-  .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr)); gap: .75rem; }
-  .agent { border: 1px solid var(--line); border-radius: 6px; padding: .6rem .8rem; background: var(--surface); }
+  .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr)); gap: .6rem; }
+  .agent { border: 1px solid var(--line); border-radius: 6px; padding: .55rem .75rem; background: var(--surface); font-size: .92rem; }
   .agent.stale { border-color: var(--amber); }
-  .agent .who { display: flex; flex-wrap: wrap; gap: .4rem .8rem; align-items: baseline; }
-  .agent .handle { font-family: var(--mono); font-size: .9rem; font-weight: 600; }
-  .agent .seen { color: var(--muted); font-size: .85rem; }
+  .agent .who { display: flex; flex-wrap: wrap; gap: .3rem .7rem; align-items: baseline; }
+  .agent .handle { font-family: var(--mono); font-size: .88rem; font-weight: 600; }
+  .agent .seen { color: var(--muted); font-size: .82rem; }
   .agent .flag { color: var(--amber); font-weight: 650; }
-  .agent .holds { list-style: none; margin: .4rem 0 0; padding: 0; }
-  .agent .holds li { padding: .15rem 0; }
-  .agent .status { margin: .5rem 0 0; padding-top: .45rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .9rem; }
+  .agent .holds { list-style: none; margin: .3rem 0 0; padding: 0; }
+  .agent .holds li { padding: .1rem 0; }
+  .agent .status { margin: .4rem 0 0; padding-top: .4rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .86rem; }
 
   /* Up next: the queues, with the reason a task is held back. */
-  .picks { display: grid; grid-template-columns: repeat(auto-fill, minmax(22rem, 1fr)); gap: .5rem 2rem; }
-  .queue .repo { font-weight: 600; margin: .3rem 0 .2rem; }
   .queue ol { list-style: none; margin: 0; padding: 0; }
   .queue li { padding: .2rem 0; display: grid; grid-template-columns: auto 1fr; gap: .5rem; align-items: baseline; }
   .queue .pick { min-width: 0; }
@@ -197,40 +224,60 @@
   .queue li.next .tag { color: var(--bg); background: var(--fg); border-color: var(--fg); }
   .queue .reason { color: var(--muted); font-size: .85rem; white-space: nowrap; }
   .queue .reason::before { content: "· "; }
+  .nexts { list-style: none; margin: 0; padding: 0; }
+  .nexts li { display: grid; grid-template-columns: 8rem 1fr; gap: .6rem; padding: .3rem 0; border-bottom: 1px solid var(--line); align-items: baseline; }
+  .nexts li:last-child { border-bottom: 0; }
+  .nexts .repo { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nexts .held { color: var(--muted); font-size: .88rem; }
 
   /* Activity: one line per event. */
   .feed { list-style: none; margin: 0; padding: 0; }
-  .feed li { display: grid; grid-template-columns: 6.5rem 1fr; gap: .8rem; padding: .35rem 0; border-bottom: 1px solid var(--line); font-size: .93rem; }
+  .feed li { display: grid; grid-template-columns: 5.5rem 1fr; gap: .8rem; padding: .3rem 0; border-bottom: 1px solid var(--line); font-size: .92rem; }
   .feed li:last-child { border-bottom: 0; }
   .feed .when { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .feed .kind { font-weight: 600; }
   .feed li.question .kind { color: var(--amber); }
-  .feed li.answer .kind { color: var(--green); }
-  .feed li.merged .kind { color: var(--green); }
+  .feed li.answer .kind, .feed li.merged .kind { color: var(--green); }
   .feed .who { font-family: var(--mono); font-size: .82rem; color: var(--muted); }
   .feed .text { color: var(--muted); }
   .feed .text::before { content: "— "; }
+  .filters { display: flex; flex-wrap: wrap; gap: .35rem; margin: 0 0 1rem; }
+  .filters a { padding: .1rem .55rem; border: 1px solid var(--line); border-radius: 999px; font-size: .85rem; color: var(--muted); }
+  .filters a.here { color: var(--bg); background: var(--fg); border-color: var(--fg); }
 
-  /* A commit in a task's history: one quiet line between the entries. */
-  .event { padding: .1rem 0 .1rem 1rem; margin: .5rem 0; border-left: 3px solid transparent; font-size: .9rem; color: var(--muted); }
-  .event .kind { font-weight: 600; color: var(--fg); }
-  .event .who { font-family: var(--mono); font-size: .82rem; }
-
-  @media (max-width: 40rem) {
+  @media (max-width: 52rem) {
+    .shell { grid-template-columns: 1fr; }
+    nav.side { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+    nav.side .foot { margin-top: .6rem; }
     main { padding: 1rem .9rem 3rem; }
-    .hero .number { font-size: 2.6rem; }
+    .cols { grid-template-columns: 1fr; }
+    .hero .number { font-size: 2.2rem; }
     th:nth-child(n+4), td:nth-child(n+4) { display: none; }
   }
 </style>
 </head>
 <body>
-<header class="top">
-  <a class="brand" href="/">tv</a>
-  {% block crumbs %}<span class="crumbs">control plane</span>{% endblock %}
-  <form method="post" action="/refresh"><button type="submit" title="Fetch every repository now">Refresh</button></form>
-</header>
+<div class="shell">
+<nav class="side">
+  <a class="brand" href="/">tv <span>control plane</span></a>
+  <a class="item{% if request.url.path == '/' %} here{% endif %}" href="/">Dashboard</a>
+  <a class="item{% if request.url.path == '/needs-you' %} here{% endif %}" href="/needs-you">Needs you {% if nav.needs %}<span class="needs">{{ nav.needs }}</span>{% endif %}</a>
+  <a class="item{% if request.url.path == '/activity' %} here{% endif %}" href="/activity">Activity</a>
+  <div class="group">Repositories</div>
+  {% for r in nav.repos %}
+  <a class="item repo{% if r.error %} bad{% endif %}{% if request.url.path.startswith(repo_url(r.name)) %} here{% endif %}" href="{{ repo_url(r.name) }}" title="{{ r.counts.open }} open, {{ r.counts.ongoing }} ongoing{% if r.error %} — {{ r.error }}{% endif %}">
+    <span class="name">{{ r.name }}</span>
+    <span>{% if r.detail or r.error %}<span class="warn" title="{{ r.error or r.detail }}">!</span> {% endif %}{% if r.needs %}<span class="needs">{{ r.needs }}</span> {% endif %}<span class="n">{{ r.counts.open }}{% if r.counts.ongoing %}+{{ r.counts.ongoing }}{% endif %}</span></span>
+  </a>
+  {% endfor %}
+  <div class="foot">
+    <span>checked {{ nav.checked|ago if nav.checked else "never" }}</span>
+    <form method="post" action="/refresh"><button type="submit" class="small" title="Fetch every repository now">Refresh</button></form>
+  </div>
+</nav>
 <main>
 {% block content %}{% endblock %}
 </main>
+</div>
 </body>
 </html>

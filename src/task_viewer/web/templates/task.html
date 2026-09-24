@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ task.task_id }}{% endblock %}
-{% block crumbs %}<span class="crumbs"><a href="{{ repo_url(view.name) }}">{{ view.name }}</a> / <span class="mono">{{ task.task_id }}</span></span>{% endblock %}
 {% block content %}
+<p class="muted"><a href="{{ repo_url(view.name) }}">{{ view.name }}</a> / <span class="mono">{{ task.task_id }}</span></p>
 <h1>{{ task.title }}</h1>
 <div class="meta">
   <span>{{ task.state }}</span>
