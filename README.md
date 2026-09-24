@@ -23,9 +23,9 @@ Four pieces, each with one job:
 
 | Piece | Where | Job |
 |---|---|---|
-| **the standard** | `gimle-skills/references/task-format.md` | what a task file *is* — one copy, everything else points at it |
+| **the standard** | `~/.agents/references/task-format.md` | what a task file *is* — one copy, everything else points at it |
 | **`next:`** | task frontmatter, set in `tv` | the running order. **Only the owner writes it** |
-| **`grind`** | `gimle-skills/skills/grind/` | drains the queue, one task per lap, ending at an open PR |
+| **`grind`** | `~/.agents/skills/grind/` | drains the queue, one task per lap, ending at an open PR |
 | **`tv`** | this repo | rank the queue, watch the worktrees, review and merge the PRs |
 
 A repo joins by creating `tasks/open/` and pasting a pointer into its
@@ -328,7 +328,7 @@ renumbering the queue.
 
 Agents pick tasks up with the `grind` skill, which claims a task on `main`
 before starting so two agents never take the same one. See
-`gimle-skills/references/task-format.md` for the full task standard.
+`~/.agents/references/task-format.md` for the full task standard.
 
 ## Working on a task with Claude Code
 
