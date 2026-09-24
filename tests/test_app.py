@@ -256,7 +256,7 @@ async def test_queueing_an_unreadable_task_does_not_crash(project: Path) -> None
 def test_the_row_marks_a_task_waiting_for_an_answer() -> None:
     thread = "## Conversation\n\n### question · claude/abc · 2026-09-24\n\nWhich?\n"
     waiting = _task("052-heat", "Waiting")
-    waiting.body = thread
+    waiting.description = thread
     assert "[bold yellow]?[/] Waiting" in _format_row(waiting, 3)
     assert "?" not in _format_row(_task("053-cool", "Quiet"), 3)
 
@@ -265,6 +265,24 @@ def test_the_meta_line_names_who_asked() -> None:
     from task_viewer.app import _meta_line
 
     task = _task("052-heat", "Waiting")
-    task.body = "## Conversation\n\n### question · claude/abc · 2026-09-24\n\nWhich?\n"
+    task.description = "## Conversation\n\n### question · claude/abc · 2026-09-24\n\nWhich?\n"
     assert "**waiting for an answer** from `claude/abc`" in _meta_line(task)
     assert "waiting" not in _meta_line(_task("053-cool", "Quiet"))
+
+
+def test_the_row_marks_a_waiting_task_even_without_a_number_column() -> None:
+    waiting = _task("add-smooth-functions", "Waiting")
+    waiting.description = "## Conversation\n\n### question · claude/abc · 2026-09-24\n\nWhich?\n"
+    assert _format_row(waiting, 0) == "[dim]○[/] [bold yellow]?[/] Waiting"
+
+
+@pytest.mark.asyncio
+async def test_the_subtitle_counts_tasks_waiting_for_an_answer(project: Path) -> None:
+    (project / "tasks" / "open" / "060-asked.md").write_text(
+        "---\ntitle: Asked\nstate: open\n---\n\n# Asked\n\n## Conversation\n\n"
+        "### question · claude/abc · 2026-09-24T10:00:00Z\n\nWhich?\n",
+        encoding="utf-8",
+    )
+    app = TaskViewerApp.single(project / "tasks", "gimle-example")
+    async with app.run_test():
+        assert "1 waiting for an answer" in app.sub_title

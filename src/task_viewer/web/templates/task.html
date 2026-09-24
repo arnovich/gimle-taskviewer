@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ task.task_id }}{% endblock %}
-{% block crumbs %}<span class="muted">/ <a href="/r/{{ view.name }}">{{ view.name }}</a> / {{ task.task_id }}</span>{% endblock %}
+{% block crumbs %}<span class="muted">/ <a href="{{ repo_url(view.name) }}">{{ view.name }}</a> / {{ task.task_id }}</span>{% endblock %}
 {% block content %}
 <h1>{{ task.title }}</h1>
 <p class="muted">
@@ -13,7 +13,7 @@
   {% set gh = github_url(view.mirror.url, task, view.mirror.branch) %}{% if gh %} · <a href="{{ gh }}">on GitHub</a>{% endif %}
 </p>
 {% if question %}
-<p class="warn">Waiting for an answer{% if question.author %} from <code>{{ question.author }}</code>{% else %}{% endif %} — asked by <code>{{ question.author or "?" }}</code> {{ question.when|ago if question.when else question.at }}.</p>
+<p class="warn">Waiting for an answer{% if question.by_agent %} from you{% else %} from an agent{% endif %} — asked by <code>{{ question.author or "?" }}</code> {{ question.when|ago if question.when else question.at }}.</p>
 {% endif %}
 
 <p>
@@ -45,7 +45,7 @@
     </select>
     as <code>{{ owner }}</code>
   </p>
-  <textarea name="text" placeholder="Markdown. This is appended to the task and pushed to {{ view.mirror.branch or 'main' }}." required></textarea>
+  <textarea name="text" placeholder="Markdown, without headings. This is appended to the task and pushed to {{ view.mirror.branch or 'main' }}." required></textarea>
   <p><button type="submit">Append and push</button></p>
 </form>
 {% endblock %}

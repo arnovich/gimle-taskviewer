@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from ..mirror import Mirror, MirrorError, name_from_url
-from .app import create_app
+from .app import LOCAL_HOSTS, create_app
 from .config import ConfigError, default_config_path, load_config, resolve_owner
 from .control import ControlPlane
 
@@ -70,12 +70,14 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     control = ControlPlane(mirrors, owner, config.max_age)
-    host, port = args.host or config.host, args.port or config.port
+    host = args.host if args.host is not None else config.host
+    port = args.port if args.port is not None else config.port
     print(f"tv-web: answering as {owner} · http://{host}:{port}/", flush=True)
 
     import uvicorn
 
-    uvicorn.run(create_app(control), host=host, port=port, log_level="warning")
+    app = create_app(control, allowed_hosts=[*LOCAL_HOSTS, host])
+    uvicorn.run(app, host=host, port=port, log_level="warning")
     return 0
 
 

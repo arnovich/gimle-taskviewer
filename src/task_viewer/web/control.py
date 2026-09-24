@@ -12,11 +12,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..conversation import Entry, new_entry
+from ..conversation import ConversationError, Entry, new_entry
 from ..conversation import append as append_entry
 from ..discovery import STATES, Task, is_tasks_dir, load_tasks
 from ..mirror import DEFAULT_MAX_AGE, Mirror, MirrorError, RefreshResult
 from ..queue_ops import QueueError, clear_next, enqueue, metadata_file, promote
+from ..textfile import TextFileError
 
 _ACTIVE = ("open", "ongoing")
 
@@ -25,6 +26,10 @@ QUEUE_OPS = ("enqueue", "promote", "unqueue")
 
 class ControlError(Exception):
     """A request that cannot be honoured, worded for the page."""
+
+
+class InvalidInput(ControlError):
+    """The request itself is wrong, before anything is written."""
 
 
 @dataclass
@@ -41,8 +46,12 @@ class RepoView:
         return self.mirror.name
 
     @property
+    def active(self) -> list[Task]:
+        return [t for t in self.tasks if t.state != "closed"]
+
+    @property
     def queue(self) -> list[Task]:
-        return [t for t in self.tasks if t.next_rank is not None]
+        return [t for t in self.active if t.next_rank is not None]
 
     @property
     def ongoing(self) -> list[Task]:
@@ -66,9 +75,8 @@ class Waiting:
 
     @property
     def on_owner(self) -> bool:
-        return self.question.author != self._owner
-
-    _owner: str = ""
+        """An agent asked, so the owner answers. Decided by the handle's shape."""
+        return self.question.by_agent
 
 
 class ControlPlane:
@@ -107,45 +115,52 @@ class ControlPlane:
                     self._errors[mirror.name] = str(error)
 
     def overview(self) -> list[RepoView]:
-        views = []
-        for mirror in self._mirrors.values():
-            view = RepoView(mirror, refresh=mirror.last_refresh, error=self._errors.get(mirror.name, ""))
-            if is_tasks_dir(mirror.tasks_dir):
-                view.tasks = load_tasks(mirror.tasks_dir, _ACTIVE)
-            elif not view.error:
-                view.error = "no tasks/ folder"
-            views.append(view)
-        return views
+        """Every repo with all of its tasks, read while the checkout holds still."""
+        return [self._view(mirror) for mirror in self._mirrors.values()]
 
     def waiting(self, views: list[RepoView] | None = None) -> list[Waiting]:
-        """Every open question across the repos, the oldest first."""
+        """Every open question across the repos, the oldest first.
+
+        Closed tasks count too: grind closes a task when its PR opens, and a
+        question the owner asks at that stage lands on a closed task.
+        """
         found = []
         for view in views or self.overview():
             for task in view.tasks:
                 question = task.open_question
                 if question is not None:
-                    found.append(Waiting(view.name, task, question, self.owner))
-        found.sort(key=lambda w: (w.question.when is None, w.question.when or 0, w.task.sort_key))
+                    found.append(Waiting(view.name, task, question))
+        found.sort(
+            key=lambda w: (w.question.when is None, w.question.when or 0, w.task.sort_key)
+        )
         return found
 
     def repo(self, name: str) -> RepoView:
-        mirror = self.mirror(name)
-        view = RepoView(mirror, refresh=mirror.last_refresh, error=self._errors.get(name, ""))
-        if is_tasks_dir(mirror.tasks_dir):
-            view.tasks = load_tasks(mirror.tasks_dir)
-        return view
+        return self._view(self.mirror(name))
 
     def task(self, name: str, task_id: str) -> Task:
-        mirror = self.mirror(name)
-        if is_tasks_dir(mirror.tasks_dir):
-            for task in load_tasks(mirror.tasks_dir):
-                if task.task_id == task_id:
-                    return task
+        for task in self.repo(name).tasks:
+            if task.task_id == task_id:
+                return task
         raise ControlError(f"{name} has no task {task_id!r}")
+
+    def _view(self, mirror: Mirror) -> RepoView:
+        view = RepoView(
+            mirror, refresh=mirror.last_refresh, error=self._errors.get(mirror.name, "")
+        )
+        with mirror.locked():
+            if is_tasks_dir(mirror.tasks_dir):
+                view.tasks = load_tasks(mirror.tasks_dir)
+            elif not view.error:
+                view.error = "no tasks/ folder"
+        return view
 
     def reply(self, name: str, task_id: str, kind: str, text: str) -> Entry:
         """Append an entry to the task's thread and push it."""
-        entry = new_entry(kind, self.owner, text)
+        try:
+            entry = new_entry(kind, self.owner, text)
+        except ConversationError as error:
+            raise InvalidInput(str(error)) from error
         mirror = self.mirror(name)
 
         def edit(root: Path) -> list[Path]:
@@ -163,12 +178,14 @@ class ControlPlane:
     def queue(self, name: str, task_id: str, op: str) -> None:
         """Change the task's ``next:`` rank — the one field only the owner writes."""
         if op not in QUEUE_OPS:
-            raise ControlError(f"unknown queue operation {op!r}")
+            raise InvalidInput(f"unknown queue operation {op!r}")
         mirror = self.mirror(name)
 
         def edit(root: Path) -> list[Path]:
             tasks_dir = root / "tasks"
             task = self._find(root, task_id, name)
+            if task.state == "closed":
+                raise ControlError(f"{task_id} is closed; a closed task has no place in the queue")
             before = {t.path: t.next_rank for t in load_tasks(tasks_dir, _ACTIVE)}
             try:
                 if op == "enqueue":
@@ -188,7 +205,7 @@ class ControlPlane:
     def _push(self, mirror: Mirror, edit, message: str) -> None:
         try:
             mirror.commit_push(edit, message)
-        except MirrorError as error:
+        except (MirrorError, TextFileError, QueueError, ConversationError) as error:
             raise ControlError(str(error)) from error
 
     @staticmethod

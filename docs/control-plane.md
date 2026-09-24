@@ -24,6 +24,11 @@ outlives every session on both sides.
 4. **Two writes, no more.** Answer (or note, or ask) in a task's
    `## Conversation`, and change the queue order (`next:`). Everything else
    an agent does, and everything else you do in an editor.
+5. **Repo content is untrusted.** Agents write these files. Markdown renders
+   with raw HTML off; a symbolic link in a repo is never followed (clones are
+   made with `core.symlinks=false`, and the loader and the writer both refuse
+   links anyway); an entry you type may not contain headings or an unclosed
+   code fence, so it cannot read back as someone else's entry.
 
 ## How a write lands
 
@@ -43,6 +48,12 @@ Mirror.commit_push(edit, "task 042: answer from erikarne")
 
 The edit callback is deliberately re-runnable: it re-reads the task from the
 fresh tree each time, so a claim that landed in between is never overwritten.
+Only a genuine race is retried — a push a server hook declined is reported
+once, with the hook's reason. Whether anything changed is decided from the
+tree, not from what the callback claims, so an edit that changed nothing
+pushes nothing. One caveat is inherent: a push that times out *after* the
+server accepted it reads as a failure, and retrying appends the entry twice —
+read the thread before retrying a timed-out write.
 
 ## What the pages show
 
@@ -53,8 +64,12 @@ fresh tree each time, so a claim that landed in between is never overwritten.
 | `/r/<repo>/t/<id>` | The task body, the conversation as entries, claim details, a link to the file on GitHub | Append an entry · Do this first / Add to queue / Remove from queue |
 
 "Needs you" is derived, never stored: the last `question` with no `answer`
-after it is open, and the task waits on whoever did not ask. A question *you*
-asked shows under a separate heading, waiting on an agent.
+after it is open, and the task waits on whoever did not ask. Who asked is
+read from the handle alone — an agent's has a `/` in it (`claude/1ff2478a`),
+yours does not — so an answer you typed in an editor counts the same as one
+from this page. A question *you* asked shows under a separate heading,
+waiting on an agent. Closed tasks are scanned too, because grind closes a
+task when its PR opens and that is when you ask most.
 
 ## Running it
 
@@ -81,8 +96,13 @@ Cloning happens once, at startup. Pushes use whatever git credentials the
 machine already has (`gh auth setup-git` is enough); git is run with every
 prompt disabled, so a missing credential fails fast instead of hanging.
 
-It binds to localhost and has no authentication. Do not expose it as it is —
-see the tasks in `tasks/open/` for what has to happen first.
+It binds to localhost and has no authentication. Two things are checked
+even there, because a browser on localhost still visits other sites: the
+`Host` header must name this machine, so a DNS-rebinding page cannot read
+the dashboard, and a POST must come from this origin (`Sec-Fetch-Site` /
+`Origin`), so a page elsewhere cannot push commits as you. That is not a
+login. Do not expose it beyond localhost as it is — see the tasks in
+`tasks/open/` for what has to happen first.
 
 ## Where it goes next
 

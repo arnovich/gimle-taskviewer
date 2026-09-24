@@ -366,8 +366,10 @@ tv-web --repo https://github.com/arnovich/gimle-mimir.git --repo ...
 
 The dashboard shows **who is waiting on you**, **what is claimed and by
 whom**, and each repo's queue; a task page shows the body, the thread, and a
-reply form. It binds to localhost and has no authentication yet.
-`docs/control-plane.md` has the design and what comes next.
+reply form. Who asked is read from the handle: an agent's has a `/` in it,
+yours does not. It binds to localhost, checks that requests really come from
+this machine and this origin, and has no login yet. `docs/control-plane.md`
+has the design and what comes next.
 
 ## Working on a task with Claude Code
 

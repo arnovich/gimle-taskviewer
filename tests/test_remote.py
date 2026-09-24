@@ -86,7 +86,7 @@ def test_git_is_never_allowed_to_ask_a_human(clone: Path, monkeypatch) -> None:
 def test_the_users_own_ssh_command_is_preserved(clone: Path, monkeypatch) -> None:
     """It may carry the deploy key this remote actually needs."""
     monkeypatch.setattr(
-        "task_viewer.remote._config", lambda key: "ssh -i /keys/deploy"
+        "task_viewer.remote._config", lambda root, key: "ssh -i /keys/deploy"
     )
     seen = {}
     real_popen = __import__("subprocess").Popen

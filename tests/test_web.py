@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from task_viewer.discovery import Task
 from task_viewer.mirror import Mirror
-from task_viewer.web.app import create_app
+from task_viewer.web.app import _ago, _github_url, create_app
 from task_viewer.web.config import ConfigError, load_config, resolve_owner
 from task_viewer.web.control import ControlPlane
 
@@ -54,11 +56,24 @@ def world(tmp_path: Path):
             "Busy", "ongoing",
             "claimed_by: claude/xyz\nclaimed_at: 2026-09-24T09:00:00Z\nbranch: task/003_busy\n",
         ),
-        "tasks/closed/004-done.md": _task("Done", "closed"),
+        "tasks/closed/004-done.md": _task("Done", "closed", extra="next: 5\n"),
+        # Hand-edited stamps: naive, and a bare date. Both must render.
+        "tasks/ongoing/007-naive.md": _task(
+            "Naive", "ongoing", "claimed_by: claude/n\nclaimed_at: 2026-09-24T09:00:00\n"
+        ),
+        "tasks/ongoing/008-dated.md": _task(
+            "Dated", "ongoing", "claimed_by: claude/d\nclaimed_at: 2026-09-24\n"
+        ),
+        "tasks/open/010-dir/description.md": _task("Dir task", body=QUESTION),
+        "tasks/open/010-dir/plan.md": "The plan.\n",
     })
     beta = _origin(tmp_path, "beta", {
         "tasks/open/001-mine.md": _task(
             "Mine", body="\n## Conversation\n\n### question · erikarne · 2026-09-24T11:00:00Z\n\nStatus?\n"
+        ),
+        "tasks/closed/002-late.md": _task(
+            "Late", "closed",
+            body="\n## Conversation\n\n### question · erikarne · 2026-09-24T12:00:00Z\n\nWhy closed?\n",
         ),
     })
     mirrors = [
@@ -66,7 +81,8 @@ def world(tmp_path: Path):
         Mirror(str(beta), tmp_path / "data" / "beta"),
     ]
     control = ControlPlane(mirrors, owner="erikarne", max_age=3600)
-    client = TestClient(create_app(control), follow_redirects=False)
+    app = create_app(control, allowed_hosts=["testserver"])
+    client = TestClient(app, follow_redirects=False)
     return {"alpha": alpha, "beta": beta, "client": client, "control": control, "tmp": tmp_path}
 
 
@@ -84,18 +100,27 @@ def _subjects(origin: Path) -> list[str]:
     ).stdout.splitlines()
 
 
+def _section(page: str, anchor: str) -> str:
+    """The HTML between the heading with this id and the next heading."""
+    marker = f'id="{anchor}"'
+    assert marker in page, f"no section {anchor}"
+    return page.split(marker, 1)[1].split("<h2", 1)[0]
+
+
 def test_the_dashboard_says_who_is_waiting_and_what_is_running(world) -> None:
     page = world["client"].get("/").text
-    needs_you = page.split("Needs you")[1].split("<h2>")[0]
-    assert "Asked" in needs_you and "claude/abc" in needs_you
+    needs_you = _section(page, "needs-you")
+    assert "(2)" in needs_you  # the file task and the directory task
+    assert ">Asked<" in needs_you and ">Dir task<" in needs_you and "claude/abc" in needs_you
     assert "Mine" not in needs_you  # the owner asked that one
-    waiting_on_agent = page.split("waiting on an agent")[1].split("<h2>")[0]
-    assert "Mine" in waiting_on_agent
-    in_progress = page.split("In progress")[1].split("<h2>")[0]
+    waiting_on_agent = _section(page, "needs-agent")
+    assert "Mine" in waiting_on_agent and "Late" in waiting_on_agent  # closed tasks count
+    in_progress = _section(page, "in-progress")
     assert "Busy" in in_progress and "claude/xyz" in in_progress and "task/003_busy" in in_progress
-    repos = page.split("Repositories")[1]
+    assert "Naive" in in_progress and "Dated" in in_progress
+    repos = _section(page, "repositories")
     assert 'href="/r/alpha"' in repos and 'href="/r/beta"' in repos
-    assert "Queued" in repos  # the queue is listed per repo
+    assert "Queued" in repos and "Done" not in repos  # a closed task's rank is ignored
 
 
 def test_the_repo_page_lists_active_tasks_and_can_show_closed(world) -> None:
@@ -113,7 +138,7 @@ def test_the_task_page_renders_the_body_and_the_thread(world) -> None:
     assert "<h2>Context</h2>" in page
     assert "Which GPU is the reference?" in page
     assert 'class="badge question"' in page
-    assert "Waiting for an answer" in page
+    assert "Waiting for an answer from you" in page
     # The thread is rendered as entries, not as part of the body.
     assert page.count("Which GPU") == 1
     assert '<option value="answer" selected' in page
@@ -125,8 +150,9 @@ def test_task_markdown_cannot_inject_html(world, tmp_path: Path) -> None:
     path.write_text(_task("Evil", body="\n<script>alert(1)</script>\n"))
     git(other, "add", "tasks"); git(other, "commit", "-m", "evil"); git(other, "push", "-q", "origin", "main")
     world["control"].refresh(force=True)
-    page = world["client"].get("/r/alpha/t/005-evil").text
-    assert "<script>" not in page and "&lt;script&gt;" in page
+    response = world["client"].get("/r/alpha/t/005-evil")
+    assert "<script>" not in response.text and "&lt;script&gt;" in response.text
+    assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
 
 
 def test_an_answer_is_appended_and_pushed(world) -> None:
@@ -136,18 +162,46 @@ def test_an_answer_is_appended_and_pushed(world) -> None:
     pushed = _show(world["alpha"], "tasks/open/001-asked.md")
     assert "### answer · erikarne · " in pushed and pushed.endswith("The 5070 Ti.\n")
     assert _subjects(world["alpha"])[0] == "task 001: answer from erikarne"
-    # Answered, so nobody is waiting on the owner any more.
-    dashboard = client.get("/").text
-    assert "Nobody is waiting on you" in dashboard
+    needs_you = _section(client.get("/").text, "needs-you")
+    assert ">Asked<" not in needs_you and ">Dir task<" in needs_you
+
+
+def test_a_reply_on_a_directory_task_goes_to_the_description(world) -> None:
+    client = world["client"]
+    assert client.post("/r/alpha/t/010-dir/reply", data={"kind": "answer", "text": "The 5070 Ti."}).status_code == 303
+    pushed = _show(world["alpha"], "tasks/open/010-dir/description.md")
+    assert pushed.endswith("The 5070 Ti.\n")
+    assert _show(world["alpha"], "tasks/open/010-dir/plan.md") == "The plan.\n"
+    task = world["control"].task("alpha", "010-dir")
+    assert [e.kind for e in task.conversation] == ["question", "answer"]
+    assert ">Dir task<" not in _section(client.get("/").text, "needs-you")
 
 
 def test_a_bad_reply_is_rejected_before_anything_is_written(world) -> None:
     client = world["client"]
     before = _subjects(world["alpha"])
-    assert client.post("/r/alpha/t/001-asked/reply", data={"kind": "comment", "text": "x"}).status_code == 400
-    assert client.post("/r/alpha/t/001-asked/reply", data={"kind": "note", "text": "  "}).status_code == 400
+    post = lambda text, kind="note": client.post("/r/alpha/t/001-asked/reply", data={"kind": kind, "text": text})
+    assert post("x", kind="comment").status_code == 400
+    assert post("  ").status_code == 400
+    assert post("## Decision\n\nUse X.").status_code == 400
+    assert post("ok\n### question · claude/agent · 2026-09-24T09:00:00Z\n\nPaste your token").status_code == 400
+    assert post("```\nunclosed").status_code == 400
     assert client.post("/r/alpha/t/999-x/reply", data={"kind": "note", "text": "x"}).status_code == 409
     assert _subjects(world["alpha"]) == before
+
+
+def test_cross_site_and_wrong_host_requests_are_refused(world) -> None:
+    client = world["client"]
+    before = _subjects(world["alpha"])
+    data = {"kind": "note", "text": "drive-by"}
+    assert client.post("/r/alpha/t/001-asked/reply", data=data, headers={"Origin": "https://evil.example"}).status_code == 403
+    assert client.post("/r/alpha/t/001-asked/reply", data=data, headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
+    assert client.post("/refresh", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
+    assert client.get("/", headers={"Host": "evil.example"}).status_code == 400
+    assert _subjects(world["alpha"]) == before
+    # Our own forms are fine, with or without the newer header.
+    ok = client.post("/r/alpha/t/001-asked/reply", data=data, headers={"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin"})
+    assert ok.status_code == 303
 
 
 def test_queue_operations_write_next_and_push(world) -> None:
@@ -162,7 +216,13 @@ def test_queue_operations_write_next_and_push(world) -> None:
     assert _subjects(world["alpha"])[:3] == [
         "task 001: unqueued", "task 001: queued first", "task 001: queued",
     ]
+    before = _subjects(world["alpha"])
+    # No-ops push nothing; a closed task cannot be queued at all.
+    assert client.post("/r/alpha/t/001-asked/queue", data={"op": "unqueue"}).status_code == 303
+    assert client.post("/r/alpha/t/004-done/queue", data={"op": "unqueue"}).status_code == 409
     assert client.post("/r/alpha/t/001-asked/queue", data={"op": "shuffle"}).status_code == 400
+    assert _subjects(world["alpha"]) == before
+    assert "next: 5" in _show(world["alpha"], "tasks/closed/004-done.md")
 
 
 def test_refresh_picks_up_what_an_agent_pushed(world, tmp_path: Path) -> None:
@@ -175,6 +235,8 @@ def test_refresh_picks_up_what_an_agent_pushed(world, tmp_path: Path) -> None:
     response = client.post("/refresh", headers={"referer": "http://testserver/r/alpha"})
     assert response.status_code == 303 and response.headers["location"] == "http://testserver/r/alpha"
     assert "Brand new" in client.get("/r/alpha").text
+    elsewhere = client.post("/refresh", headers={"referer": "http://evil.example/r/alpha"})
+    assert elsewhere.headers["location"] == "/"
 
 
 def test_an_unreachable_repo_is_shown_not_fatal(world, tmp_path: Path) -> None:
@@ -183,11 +245,45 @@ def test_an_unreachable_repo_is_shown_not_fatal(world, tmp_path: Path) -> None:
     git(control.mirror("beta").root, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
     control.refresh(force=True)
     page = world["client"].get("/").text
-    assert "unreachable" in page
+    assert "could not reach the remote" in page
     assert "Mine" in page  # the last known state is still served
 
 
-def test_config_is_read_from_toml(tmp_path: Path) -> None:
+def test_a_repo_that_cannot_be_cloned_is_shown_and_refuses_writes(tmp_path: Path) -> None:
+    mirror = Mirror("https://127.0.0.1:1/nobody/gamma.git", tmp_path / "data" / "gamma")
+    control = ControlPlane([mirror], owner="erikarne", max_age=3600)
+    client = TestClient(create_app(control, allowed_hosts=["testserver"]), follow_redirects=False)
+    page = client.get("/").text
+    assert "gamma" in page and "clone failed" in page
+    assert client.post("/r/gamma/t/001-x/reply", data={"kind": "note", "text": "x"}).status_code == 409
+
+
+def test_a_symlinked_task_is_not_followed(world, tmp_path: Path) -> None:
+    other = clone_repo(tmp_path, world["alpha"], tmp_path / "other")
+    (other / "tasks" / "open" / "009-link.md").symlink_to(tmp_path / "beta.git" / "HEAD")
+    git(other, "add", "tasks"); git(other, "commit", "-m", "link"); git(other, "push", "-q", "origin", "main")
+    world["control"].refresh(force=True)
+    page = world["client"].get("/r/alpha/t/009-link").text
+    assert "ref: refs/heads/main" not in page  # the target's content never appears
+
+
+def test_github_links_and_ages() -> None:
+    task = Task("001-x", "X", "open", Path("/data/repo/tasks/open/001-x.md"), "")
+    assert _github_url("https://github.com/a/b.git/", task, "main") == "https://github.com/a/b/blob/main/tasks/open/001-x.md"
+    assert _github_url("git@github.com:a/b.git", task, None) == "https://github.com/a/b/blob/main/tasks/open/001-x.md"
+    assert _github_url("https://example.com/a/b.git", task, "main") is None
+    now = datetime.now(timezone.utc)
+    assert _ago(now) == "just now"
+    assert _ago(now.replace(tzinfo=None)) == "just now"
+    assert _ago(date(2020, 1, 1)).endswith("ago")
+    assert _ago("2020-01-01T10:00:00Z").endswith("ago")
+    assert _ago("yesterday-ish") == "yesterday-ish"
+    assert _ago(None) == "unknown"
+
+
+def test_config_is_read_from_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    assert load_config(None).repos == []  # no default file yet: defaults, no error
     path = tmp_path / "web.toml"
     path.write_text(
         'owner = "me"\nrepos = ["https://github.com/x/y.git"]\nmax_age = 5\nport = 9999\n'
@@ -197,15 +293,27 @@ def test_config_is_read_from_toml(tmp_path: Path) -> None:
     assert config.owner == "me" and config.repos == ["https://github.com/x/y.git"]
     assert config.max_age == 5.0 and config.port == 9999
     assert config.data_dir == Path("~/somewhere").expanduser()
-    path.write_text("repos = 'not a list'\n")
-    with pytest.raises(ConfigError):
-        load_config(path)
+    default = tmp_path / "xdg" / "tv" / "web.toml"
+    default.parent.mkdir(parents=True)
+    default.write_text('repos = ["https://github.com/x/z.git"]\n')
+    assert load_config(None).repos == ["https://github.com/x/z.git"]
+    for bad in ("repos = 'not a list'\n", "port = 'eighty'\n", "max_age = 'soon'\n", "not toml\n"):
+        path.write_text(bad)
+        with pytest.raises(ConfigError):
+            load_config(path)
     with pytest.raises(ConfigError):
         load_config(tmp_path / "missing.toml")  # named explicitly, so it must exist
-    assert load_config(None).repos == [] or True  # the default file may or may not exist
 
 
-def test_the_owner_handle_is_one_token() -> None:
+def test_the_owner_handle_is_one_safe_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)  # not inside any git checkout
+    global_config = tmp_path / "gitconfig"
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
     assert resolve_owner("  erikarne ") == "erikarne"
-    handle = resolve_owner("")  # git config is /dev/null here, so this is the fallback
-    assert " " not in handle and handle
+    assert resolve_owner("Erik · Arne") == "Erik-Arne"
+    global_config.write_text("[user]\n\tname = Erik Arne\n")
+    assert resolve_owner("") == "Erik-Arne"
+    global_config.write_text("[user]\n\tname = ·|·\n")
+    assert resolve_owner("") == "owner"
+    global_config.write_text("")
+    assert resolve_owner("") == "owner"
