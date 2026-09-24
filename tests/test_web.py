@@ -157,18 +157,38 @@ def test_the_dashboard_says_what_is_your_move(world) -> None:
     assert 'class="number">5<' in needs_you
     assert "2 questions, 1 branch ready to merge, 1 task given up on, 1 ambiguous number" in needs_you
     assert ">Asked<" in needs_you and ">Dir task<" in needs_you and "claude/abc" in needs_you
-    assert ">Mine<" not in needs_you  # the owner asked that one
+    assert ">Mine<" not in needs_you  # the owner asked that one; it is on /needs-you
+    # The other buckets are folded, but present.
+    assert "<details>" in needs_you
     assert ">Done<" in needs_you and "task/004_done" in needs_you
     assert ">Stuck<" in needs_you
     assert ">Twin A<" in needs_you and ">Twin B<" in needs_you
+
+
+def test_the_needs_you_page_has_every_bucket_in_full(world) -> None:
+    page = world["client"].get("/needs-you").text
+    assert ">Asked<" in _section(page, "questions")
+    assert ">Done<" in _section(page, "ready")
+    assert ">Stuck<" in _section(page, "gave-up")
+    assert ">Twin A<" in _section(page, "ambiguous")
     waiting_on_agent = _section(page, "needs-agent")
     assert ">Mine<" in waiting_on_agent and ">Late<" in waiting_on_agent  # closed tasks count
+
+
+def test_the_sidebar_lists_repos_with_what_needs_you(world) -> None:
+    page = world["client"].get("/r/beta").text
+    side = page.split('<nav class="side">')[1].split("</nav>")[0]
+    assert 'href="/r/alpha"' in side and 'href="/r/beta"' in side
+    assert 'class="item repo here"' in side and ">beta<" in side
+    alpha_row = side.split('href="/r/alpha"')[1].split("</a>")[0]
+    assert '<span class="needs">5</span>' in alpha_row
+    assert 'href="/needs-you">Needs you <span class="needs">5</span>' in side
+    assert "checked just now" in side
 
 
 def test_the_dashboard_shows_who_is_running_and_when_they_were_last_seen(world) -> None:
     page = world["client"].get("/").text
     running = _section(page, "in-progress")
-    assert 'class="number">' not in running
     assert "claude/xyz" in running and ">Busy<" in running
     assert "task/003_busy" in running  # the branch on the remote is the heartbeat
     assert "Plan written, reviews next." in running  # the last note is the status line
@@ -176,30 +196,38 @@ def test_the_dashboard_shows_who_is_running_and_when_they_were_last_seen(world) 
     assert "claude/d" in running and ">Dated<" in running
 
 
-def test_the_dashboard_shows_the_queue_as_grind_reads_it(world) -> None:
-    page = world["client"].get("/").text
-    up_next = _section(page, "up-next")
-    alpha = up_next.split(">alpha<")[1].split('class="queue"')[0]
-    rows = [line for line in alpha.splitlines() if "<li" in line]
+def test_the_dashboard_names_the_next_pick_and_the_repo_page_explains_the_rest(world) -> None:
+    client = world["client"]
+    up_next = _section(client.get("/").text, "up-next")
+    alpha = up_next.split(">alpha<")[1].split("</li>")[0]
+    assert ">Free<" in alpha and "+3 ranked" in alpha
+    assert "nothing ranked" in up_next.split(">beta<")[1]
+
+    queue = _section(client.get("/r/alpha").text, "up-next")
+    rows = [line for line in queue.splitlines() if "<li" in line]
     assert [r.split("</a>")[0].rsplit(">", 1)[1] for r in rows] == ["Queued", "Busy", "Stuck", "Free"]
     assert "blocked by 001-asked" in rows[0]
     assert "claimed by claude/xyz" in rows[1]
     assert "given up after 2 attempts" in rows[2]
     assert 'class="next"' in rows[3] and ">next<" in rows[3]
-    assert "Nothing ranked" in up_next.split(">beta<")[1]
 
 
-def test_the_dashboard_lists_what_happened(world) -> None:
-    page = world["client"].get("/").text
-    activity = _section(page, "activity")
+def test_the_dashboard_and_the_activity_page_list_what_happened(world) -> None:
+    client = world["client"]
+    activity = _section(client.get("/").text, "activity")
     assert ">claimed<" in activity and ">planned<" in activity
     assert ">merged<" in activity and "#7" in activity and ">Done<" in activity
     assert ">note<" in activity and "Plan written, reviews next." in activity
     # The note's own commit ("task 003: plan") is one event with the entry, not two.
     assert activity.count("Plan written") == 1
     assert ">question<" in activity and "Which GPU" in activity
-    repos = _section(page, "repositories")
-    assert 'href="/r/alpha"' in repos and 'href="/r/beta"' in repos
+
+    everything = client.get("/activity").text
+    assert "Which GPU" in everything
+    assert "Status?" in everything  # beta's thread
+    only_beta = client.get("/activity?repo=beta").text
+    assert "Status?" in only_beta and "Which GPU" not in only_beta
+    assert client.get("/activity?repo=nope").status_code == 404
 
 
 def test_the_repo_page_lists_active_tasks_and_can_show_closed(world) -> None:
@@ -333,9 +361,10 @@ def test_an_unreachable_repo_is_shown_not_fatal(world, tmp_path: Path) -> None:
     control.refresh(force=True)  # clones; the remote can only vanish afterwards
     git(control.mirror("beta").root, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
     control.refresh(force=True)
-    page = world["client"].get("/").text
+    page = world["client"].get("/r/beta").text
     assert "could not reach the remote" in page
     assert "Mine" in page  # the last known state is still served
+    assert 'class="warn" title="could not reach the remote"' in page  # the sidebar marks it
 
 
 def test_a_repo_that_cannot_be_cloned_is_shown_and_refuses_writes(tmp_path: Path) -> None:

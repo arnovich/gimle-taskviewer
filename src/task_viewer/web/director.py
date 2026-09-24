@@ -186,6 +186,11 @@ class Event:
         return self.source == "entry"
 
 
+def next_pick(picks: list[Pick]) -> Pick | None:
+    """The first ranked task nothing holds back, or ``None``."""
+    return next((p for p in picks if not p.reason), None)
+
+
 def attention(facts: list[RepoFacts]) -> Attention:
     found = Attention()
     for repo in facts:
@@ -265,7 +270,9 @@ def _reason(task: Task, repo: RepoFacts, dupes: dict[str, list[Task]]) -> str:
     return ""
 
 
-def feed(facts: list[RepoFacts], now: datetime | None = None) -> list[Event]:
+def feed(
+    facts: list[RepoFacts], now: datetime | None = None, limit: int = FEED_LIMIT
+) -> list[Event]:
     """Everything that happened across the repos lately, newest first."""
     now = now or datetime.now(timezone.utc)
     since = now - FEED_WINDOW
@@ -282,7 +289,7 @@ def feed(facts: list[RepoFacts], now: datetime | None = None) -> list[Event]:
                 if entry.when is not None and entry.when >= since:
                     events.append(_entry_event(repo.name, task, entry))
     events.sort(key=lambda e: e.when, reverse=True)
-    return _dedupe(events)[:FEED_LIMIT]
+    return _dedupe(events)[:limit]
 
 
 def timeline(repo: RepoFacts, task: Task) -> list[Event]:

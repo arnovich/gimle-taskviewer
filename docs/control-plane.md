@@ -57,11 +57,18 @@ read the thread before retrying a timed-out write.
 
 ## What the pages show
 
+Every page carries a sidebar: the repositories, each with its open count and
+an amber number where something there needs you; the total under *Needs you*;
+when the remotes were last checked; and Refresh. A `!` marks a repo whose
+remote could not be reached or could not be cloned.
+
 | Page | Shows | Writes |
 |---|---|---|
-| `/` | **Needs you** — everything that is your move, as one count: questions agents asked, closed tasks whose branch is still on the remote (a PR waiting to merge), tasks agents gave up on after two attempts, and numbers two tasks share. **Waiting on an agent** — your own open questions. **Running now** — one card per agent handle: what it holds, when it was last seen (its branch tip, its last entry, its claim), its last note as a status line, and a *stale* flag after four quiet hours. **Up next** — each repo's queue as grind reads it, with the reason a task would be skipped and the one it would take next. **Activity** — the last seven days across all repos: claims, plans, closes, merges, questions, answers, notes. **Repositories** — counts and when each remote was last reached. | Refresh |
-| `/r/<repo>` | The repo's active tasks (closed on request), with rank, priority, labels and the `?` marker | — |
-| `/r/<repo>/t/<id>` | The task body, then its history: every commit that touched it on the default branch and every entry of its conversation, in one timeline; claim details; a link to the file on GitHub | Append an entry · Do this first / Add to queue / Remove from queue |
+| `/` | One screen. The **Needs you** count with its breakdown, the questions agents asked in full, and the other buckets — branches ready to merge, tasks given up on, ambiguous numbers — as folds. **Running now**: one card per agent handle with what it holds, when it was last seen (its branch tip, its last entry, its claim), its last note as a status line, and a *stale* flag after four quiet hours. **Up next**: per repo, the one task grind would take, or how many are ranked and held. **Activity**: the latest dozen events. | Refresh |
+| `/needs-you` | Every bucket in full, plus your own open questions waiting on an agent. | — |
+| `/activity` | The last seven days across all repos, or one repo with `?repo=`: claims, plans, closes, merges, questions, answers, notes. | — |
+| `/r/<repo>` | The queue as grind reads it — every ranked task with the reason it is held and the one that is next — then the tasks (closed on request) with rank, priority, labels and the `?` marker. | — |
+| `/r/<repo>/t/<id>` | The task body, then its history: every commit that touched it on the default branch and every entry of its conversation, in one timeline; claim details; a link to the file on GitHub. | Append an entry · Do this first / Add to queue / Remove from queue |
 
 All of that is read from the repositories and nothing else. The git log is the
 activity log: every grind step is a commit on the default branch with a

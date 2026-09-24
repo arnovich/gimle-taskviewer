@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Activity{% endblock %}
+{% block content %}
+<h1>Activity</h1>
+<p class="lede">Everything that happened in the last seven days: claims, plans, closes, merges, and what was said on the tasks.</p>
+<div class="filters">
+  <a href="/activity" class="{% if not repo %}here{% endif %}">All repositories</a>
+  {% for r in nav.repos %}<a href="/activity?repo={{ r.name|urlencode }}" class="{% if repo == r.name %}here{% endif %}">{{ r.name }}</a>{% endfor %}
+</div>
+{% if events %}
+<ul class="feed" id="activity-list">
+{% for e in events %}
+  <li class="{{ e.kind }}">
+    <span class="when">{{ e.when|ago }}</span>
+    <span class="what"><span class="muted">{{ e.repo }}</span> <span class="kind">{{ e.kind }}</span>{% if e.pull_request %} <span class="muted">#{{ e.pull_request }}</span>{% endif %}
+      {% if e.task_id %}<a href="{{ task_url(e.repo, e.task_id) }}">{{ e.task_title }}</a>{% elif e.task_title %}{{ e.task_title }}{% endif %}
+      <span class="who">{{ e.who }}</span>
+      {% if e.is_entry %}<span class="text">{{ e.text|truncate(200) }}</span>{% elif e.kind == "changed" %}<span class="text">{{ e.text|truncate(100) }}</span>{% endif %}</span>
+  </li>
+{% endfor %}
+</ul>
+{% else %}<p class="empty">Nothing has happened in the last week.</p>{% endif %}
+{% endblock %}
