@@ -12,7 +12,7 @@ outlives every session on both sides.
 1. **The repositories are the database.** There is no other state. Every
    task, every rank, every question and answer is a markdown file on the
    default branch, in the shape fixed by
-   `gimle-skills/references/task-format.md`.
+   `~/.agents/references/task-format.md`.
 2. **The app owns its checkouts.** It never reads or writes your working
    directories. Each watched repo is cloned into the app's data directory
    (`~/.local/share/tv/mirrors/<name>` by default), kept on the default
