@@ -3,7 +3,7 @@
 ``next`` is a running order the repo owner sets, deliberately separate from
 ``priority``. Priority says how important a task is; ``next`` says what to do
 first. Lower ranks are taken first, gaps are fine, and **agents never write this
-field** — see ``gimle-skills/references/task-format.md``.
+field** — see ``~/.agents/references/task-format.md``.
 
 Frontmatter is edited with a targeted line replacement rather than a YAML
 round-trip, to preserve the author's formatting. That makes the matching rules

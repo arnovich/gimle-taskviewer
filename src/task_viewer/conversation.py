@@ -16,7 +16,7 @@ did not ask. The two parties are told apart by the author alone — an agent's
 handle follows the ``claimed_by`` scheme, ``<family>/<id>``, so a ``/`` means
 agent and anything else means the owner.
 
-The format is fixed by ``gimle-skills/references/task-format.md``; this module
+The format is fixed by ``~/.agents/references/task-format.md``; this module
 reads it tolerantly (any of the usual separators, a bare date, headings inside
 fenced code ignored, everything column-0 only) and writes it canonically.
 """

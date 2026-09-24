@@ -23,15 +23,15 @@ Four pieces, each with one job:
 
 | Piece | Where | Job |
 |---|---|---|
-| **the standard** | `gimle-skills/references/task-format.md` | what a task file *is* — one copy, everything else points at it |
+| **the standard** | `~/.agents/references/task-format.md` | what a task file *is* — one copy, everything else points at it |
 | **`next:`** | task frontmatter, set in `tv` | the running order. **Only the owner writes it** |
-| **`grind`** | `gimle-skills/skills/grind/` | drains the queue, one task per lap, ending at an open PR |
+| **`grind`** | `~/.agents/skills/grind/` | drains the queue, one task per lap, ending at an open PR |
 | **`tv`** | this repo | rank the queue, watch the worktrees, review and merge the PRs |
 | **`tv-web`** | this repo | the same, from a browser, run from the GitHub repos alone — plus the conversation |
 | **the conversation** | `## Conversation` in a task | how you and the agents talk: questions, answers, notes, in the file |
 
 A repo joins by creating `tasks/open/` and pasting a pointer into its
-`CLAUDE.md`. Nothing needs registering: `tv` lists any folder with tasks, and
+`AGENTS.md`. Nothing needs registering: `tv` lists any folder with tasks, and
 `grind` is installed workspace-wide. See *Setting up a new repo* in the standard.
 
 ## Task layout
@@ -330,7 +330,7 @@ renumbering the queue.
 
 Agents pick tasks up with the `grind` skill, which claims a task on `main`
 before starting so two agents never take the same one. See
-`gimle-skills/references/task-format.md` for the full task standard.
+`~/.agents/references/task-format.md` for the full task standard.
 
 ## Talking to agents through the task
 

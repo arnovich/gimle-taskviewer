@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 `gimle-taskviewer` is two front-ends over the same markdown task files:
 
@@ -38,7 +38,7 @@ build throwaway repositories rather than faking the git CLI.
 
 ### Task File Format
 
-Task files follow **`gimle-skills/references/task-format.md`** — that document is
+Task files follow **`~/.agents/references/task-format.md`** — that document is
 the authority on frontmatter, filenames, body sections and priority meanings.
 Read it before creating or editing a task file.
 
