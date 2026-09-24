@@ -14,6 +14,8 @@ from pathlib import Path
 
 import yaml
 
+from .conversation import Entry, open_question, parse
+
 # States map one-to-one onto the subdirectories of ``tasks/``, in lifecycle order.
 STATES = ("open", "ongoing", "closed")
 
@@ -51,6 +53,19 @@ class Task:
         """
         match = _NUMBER_RE.match(self.task_id)
         return match.group(1) if match else None
+
+    @property
+    def conversation(self) -> list[Entry]:
+        """The thread at the bottom of the body, oldest first."""
+        return parse(self.body)
+
+    @property
+    def open_question(self) -> Entry | None:
+        """The question nobody has answered yet, when there is one.
+
+        Whoever did not ask is who the task is waiting on.
+        """
+        return open_question(self.conversation)
 
     @property
     def sort_key(self) -> tuple[int, str]:
