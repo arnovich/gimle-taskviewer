@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from ..conversation import Entry
 from ..discovery import Task
+from ..github import Pull, Run, Snapshot
 from ..history import Commit, branch_number
 
 # A claim that has produced neither a commit nor a word for this long is
@@ -25,6 +26,10 @@ STALE_AFTER = timedelta(hours=4)
 FEED_WINDOW = timedelta(days=7)
 FEED_LIMIT = 60
 
+# A failed run on a task branch older than this is history, not something to
+# act on. The default branch is different: it is failing until it passes.
+CI_WINDOW = timedelta(hours=24)
+
 
 @dataclass
 class RepoFacts:
@@ -34,6 +39,17 @@ class RepoFacts:
     tasks: list[Task]
     commits: list[Commit] = field(default_factory=list)
     branch_tips: dict[str, datetime] = field(default_factory=dict)
+    github: Snapshot | None = None
+
+    def task_for_branch(self, branch: str) -> Task | None:
+        """The task a ``task/NNN_...`` branch belongs to, by its number."""
+        number = branch_number(branch)
+        if number is None:
+            return None
+        for task in self.tasks:
+            if task.number == number:
+                return task
+        return None
 
     def branch_for(self, task: Task) -> str | None:
         """The remote task branch for this task, by its number.
@@ -81,8 +97,21 @@ class Waiting:
 
 
 @dataclass(frozen=True)
-class Ready:
-    """A closed task whose branch is still on the remote: a PR awaiting you."""
+class OpenPull:
+    """A pull request waiting on you, with the task it came from when known."""
+
+    repo: str
+    pull: Pull
+    task: Task | None
+
+
+@dataclass(frozen=True)
+class StrayBranch:
+    """A closed task's branch still on the remote with no pull request.
+
+    Not a decision, housekeeping: a merged branch nobody deleted, or work
+    that was never proposed. Listed, never counted.
+    """
 
     repo: str
     task: Task
@@ -109,14 +138,23 @@ class Attention:
     """Everything that is the owner's move, most urgent kind first."""
 
     questions: list[Waiting] = field(default_factory=list)
-    ready: list[Ready] = field(default_factory=list)
+    pulls: list[OpenPull] = field(default_factory=list)  # your move: ready for review
+    theirs: list[OpenPull] = field(default_factory=list)  # drafts, changes requested: the agent's move
     gave_up: list[GaveUp] = field(default_factory=list)
     ambiguous: list[Ambiguous] = field(default_factory=list)
     asked: list[Waiting] = field(default_factory=list)  # the owner's own open questions
+    strays: list[StrayBranch] = field(default_factory=list)  # listed, not counted
+    unknown: list[str] = field(default_factory=list)  # repos GitHub could not be asked about
+
+    def pull_for(self, repo: str, task: Task) -> OpenPull | None:
+        for candidate in self.pulls + self.theirs:
+            if candidate.repo == repo and candidate.task is not None and candidate.task.task_id == task.task_id:
+                return candidate
+        return None
 
     @property
     def count(self) -> int:
-        return len(self.questions) + len(self.ready) + len(self.gave_up) + len(self.ambiguous)
+        return len(self.questions) + len(self.pulls) + len(self.gave_up) + len(self.ambiguous)
 
     @property
     def summary(self) -> str:
@@ -124,8 +162,8 @@ class Attention:
         parts = []
         if self.questions:
             parts.append(_plural(len(self.questions), "question"))
-        if self.ready:
-            parts.append(_plural(len(self.ready), "branch", "branches") + " ready to merge")
+        if self.pulls:
+            parts.append(_plural(len(self.pulls), "pull request") + " to review")
         if self.gave_up:
             parts.append(_plural(len(self.gave_up), "task") + " given up on")
         if self.ambiguous:
@@ -197,6 +235,15 @@ def attention(facts: list[RepoFacts]) -> Attention:
         dupes = repo.duplicates()
         for number, tasks in sorted(dupes.items()):
             found.ambiguous.append(Ambiguous(repo.name, number, tasks))
+        snapshot = repo.github
+        if snapshot is not None and snapshot.pulls_ok:
+            for pull in snapshot.pulls:
+                item = OpenPull(repo.name, pull, repo.task_for_branch(pull.branch))
+                # A draft, or one the reviewer sent back, is the agent's move.
+                (found.theirs if pull.draft or pull.review == "CHANGES_REQUESTED" else found.pulls).append(item)
+        elif snapshot is not None:
+            found.unknown.append(repo.name)
+        with_pull = {p.branch for p in snapshot.pulls} if snapshot is not None and snapshot.pulls_ok else None
         for task in repo.tasks:
             question = task.open_question
             if question is not None:
@@ -204,15 +251,122 @@ def attention(facts: list[RepoFacts]) -> Attention:
                 target.append(Waiting(repo.name, task, question))
             if task.state == "closed":
                 branch = repo.branch_for(task)
-                if branch is not None:
-                    found.ready.append(Ready(repo.name, task, branch, repo.branch_tips[branch]))
+                # Only when GitHub answered: without it a branch could be a PR.
+                if branch is not None and with_pull is not None and branch not in with_pull:
+                    found.strays.append(StrayBranch(repo.name, task, branch, repo.branch_tips[branch]))
             elif task.attempts >= 2:
                 found.gave_up.append(GaveUp(repo.name, task, task.attempts))
     oldest = lambda w: (w.question.when is None, w.question.when or 0, w.task.sort_key)
     found.questions.sort(key=oldest)
     found.asked.sort(key=oldest)
-    found.ready.sort(key=lambda r: r.since)
+    found.pulls.sort(key=lambda p: (p.pull.updated is None, p.pull.updated or 0))
+    found.theirs.sort(key=lambda p: (p.pull.updated is None, p.pull.updated or 0))
+    found.strays.sort(key=lambda s: s.since)
     return found
+
+
+@dataclass(frozen=True)
+class LiveRun:
+    """A run that is running or queued, or failed recently, with its task."""
+
+    repo: str
+    run: Run
+    task: Task | None
+
+
+@dataclass
+class Ci:
+    """What the workflows are doing right now, across the repos."""
+
+    running: list[LiveRun] = field(default_factory=list)
+    queued: list[LiveRun] = field(default_factory=list)
+    failed: list[LiveRun] = field(default_factory=list)  # latest per workflow+branch, last 24h
+    unknown: list[str] = field(default_factory=list)  # repos that could not be asked
+
+    @property
+    def quiet(self) -> bool:
+        return not (self.running or self.queued or self.failed)
+
+    @property
+    def summary(self) -> str:
+        parts = []
+        if self.running:
+            parts.append(_plural(len(self.running), "run") + " running")
+        if self.queued:
+            parts.append(_plural(len(self.queued), "run") + " queued")
+        if self.failed:
+            parts.append(_plural(len(self.failed), "failure"))
+        return ", ".join(parts) if parts else "all quiet"
+
+
+def ci(facts: list[RepoFacts], branches: dict[str, str | None] | None = None, now: datetime | None = None) -> Ci:
+    """Running and queued runs, and the latest real failure per workflow and branch.
+
+    "Latest" looks only at runs that decided something: a cancelled or
+    skipped run after a failure does not clear it. A failure on a task
+    branch older than ``CI_WINDOW`` is history; on the default branch (named
+    per repo in ``branches``) it stays until a run passes, which is also
+    what the sidebar dot says.
+    """
+    now = now or datetime.now(timezone.utc)
+    branches = branches or {}
+    found = Ci()
+    for repo in facts:
+        snapshot = repo.github
+        if snapshot is None:
+            continue
+        if not snapshot.runs_ok:
+            found.unknown.append(repo.name)
+            continue
+        default = branches.get(repo.name)
+        for run in snapshot.runs:
+            live = LiveRun(repo.name, run, repo.task_for_branch(run.branch))
+            if run.state == "running":
+                found.running.append(live)
+            elif run.state == "queued":
+                found.queued.append(live)
+        for run in _latest_decided(snapshot.runs).values():
+            if run.state != "failed" or run.when is None:
+                continue
+            if run.branch == default or now - run.when <= CI_WINDOW:
+                found.failed.append(LiveRun(repo.name, run, repo.task_for_branch(run.branch)))
+    newest = lambda r: -((r.run.when or now).timestamp())
+    found.running.sort(key=newest)
+    found.queued.sort(key=newest)
+    found.failed.sort(key=newest)
+    return found
+
+
+def main_health(repo: RepoFacts, branch: str | None) -> str:
+    """``passing``, ``failing``, ``running`` or ``""`` for the default branch's workflows.
+
+    The same rule as :func:`ci`: the latest run per workflow that passed or
+    failed decides; a failure outranks a run in progress, since the fix is
+    not in until it passes.
+    """
+    snapshot = repo.github
+    if snapshot is None or not snapshot.runs_ok or branch is None:
+        return ""
+    on_branch = [run for run in snapshot.runs if run.branch == branch]
+    latest = _latest_decided(on_branch)
+    if any(run.state == "failed" for run in latest.values()):
+        return "failing"
+    if any(run.live for run in on_branch):
+        return "running"
+    return "passing" if latest else ""
+
+
+def _latest_decided(runs: list[Run]) -> dict[tuple[str, str], Run]:
+    """The newest passed-or-failed run per (workflow, branch)."""
+    latest: dict[tuple[str, str], Run] = {}
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+    for run in runs:
+        if not run.decided:
+            continue
+        key = (run.workflow, run.branch)
+        if key not in latest or (run.when or floor) > (latest[key].when or floor):
+            latest[key] = run
+    return latest
 
 
 def agents(facts: list[RepoFacts]) -> list[Agent]:
@@ -355,6 +509,65 @@ def _dedupe(events: list[Event]) -> list[Event]:
             continue
         kept.append(event)
     return kept
+
+
+# Sort orders the repo page offers, and the default direction of each.
+SORTS = ("number", "title", "created", "priority", "state")
+_PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
+_STATE_RANK = {"ongoing": 0, "open": 1, "closed": 2}
+
+
+def created_at(repo: RepoFacts) -> dict[str, datetime]:
+    """When each task first appeared, from the oldest commit that named it.
+
+    Only as far back as the log was read; older tasks have no date and sort
+    last. A ``created:`` in the frontmatter, when the author wrote one, wins.
+    """
+    first: dict[str, datetime] = {}
+    for commit in reversed(repo.commits):  # oldest first
+        number = commit.number
+        if number is not None and number not in first:
+            first[number] = commit.when
+    found: dict[str, datetime] = {}
+    for task in repo.tasks:
+        written = _stamp(task.meta.get("created"))
+        if written is not None:
+            found[task.task_id] = written
+        elif task.number is not None and task.number in first:
+            found[task.task_id] = first[task.number]
+    return found
+
+
+def arrange(repo: RepoFacts, tasks: list[Task], sort: str, descending: bool, query: str) -> list[Task]:
+    """The tasks a repo page lists: filtered by ``query``, ordered by ``sort``."""
+    needle = query.strip().lower()
+    if needle:
+        tasks = [t for t in tasks if needle in _haystack(t)]
+    if sort not in SORTS:
+        sort = "number"
+    floor = datetime.max.replace(tzinfo=timezone.utc)
+    if sort == "title":
+        key = lambda t: (t.title.lower(), t.sort_key)
+    elif sort == "created":
+        dates = created_at(repo)
+        key = lambda t: (t.task_id not in dates, dates.get(t.task_id, floor), t.sort_key)
+    elif sort == "priority":
+        key = lambda t: (_PRIORITY_RANK.get((t.priority or "").lower(), 3), t.sort_key)
+    elif sort == "state":
+        key = lambda t: (_STATE_RANK.get(t.state, 3), t.sort_key)
+    else:
+        key = lambda t: t.sort_key
+    ordered = sorted(tasks, key=key)
+    if descending:
+        ordered.reverse()
+        if sort == "created":  # unknown dates stay last either way
+            known = [t for t in ordered if t.task_id in created_at(repo)]
+            ordered = known + [t for t in ordered if t not in known]
+    return ordered
+
+
+def _haystack(task: Task) -> str:
+    return " ".join([task.task_id, task.title, " ".join(task.labels), task.body]).lower()
 
 
 def _plural(count: int, word: str, plural: str | None = None) -> str:

@@ -74,6 +74,32 @@
   nav.side .group { margin: .9rem 0 .2rem; font-size: .78rem; font-weight: 500; color: var(--muted); }
   nav.side .repo .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   nav.side .repo.bad .name { color: var(--danger); }
+  .ci-dot { display: inline-block; width: .5rem; height: .5rem; border-radius: 50%; background: var(--line-strong); vertical-align: middle; margin-right: .35rem; }
+  .ci-dot.passing { background: var(--green); }
+  .ci-dot.failing { background: var(--danger); }
+  .ci-dot.running { background: var(--amber); }
+
+  /* The repo page's task list: a search box and sortable headings. */
+  form.search { display: flex; gap: .5rem; align-items: center; margin: 0 0 .6rem; }
+  form.search input[type="search"] { flex: 1; max-width: 26rem; padding: .3rem .6rem; font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; }
+  th a.sort { color: var(--muted); }
+  th a.sort.here { color: var(--fg); }
+  th a.sort:hover { text-decoration: none; color: var(--fg); }
+
+  /* Pull requests and CI runs: one line each. */
+  .checks { font-size: .82rem; font-variant-numeric: tabular-nums; }
+  .checks.passing { color: var(--green); }
+  .checks.failing { color: var(--danger); }
+  .checks.pending { color: var(--amber); }
+  .runs { list-style: none; margin: 0; padding: 0; }
+  .runs li { display: grid; grid-template-columns: 5.5rem 1fr; gap: .8rem; padding: .3rem 0; border-bottom: 1px solid var(--line); font-size: .92rem; }
+  .runs li:last-child { border-bottom: 0; }
+  .runs .state { font-weight: 600; }
+  .runs li.running .state { color: var(--amber); }
+  .runs li.queued .state { color: var(--muted); }
+  .runs li.failed .state { color: var(--danger); }
+  .runs li.passed .state { color: var(--green); }
+  .runs .branch { font-family: var(--mono); font-size: .82rem; color: var(--muted); }
   nav.side .foot { margin-top: auto; padding-top: .9rem; display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; color: var(--muted); }
   main { min-width: 0; max-width: 68rem; padding: 1.35rem 1.6rem 4rem; }
 
@@ -266,7 +292,7 @@
   <div class="group">Repositories</div>
   {% for r in nav.repos %}
   <a class="item repo{% if r.error %} bad{% endif %}{% if request.url.path.startswith(repo_url(r.name)) %} here{% endif %}" href="{{ repo_url(r.name) }}" title="{{ r.counts.open }} open, {{ r.counts.ongoing }} ongoing{% if r.error %} — {{ r.error }}{% endif %}">
-    <span class="name">{{ r.name }}</span>
+    <span class="name"><span class="ci-dot {{ r.ci }}" title="{% if r.ci %}CI on the default branch: {{ r.ci }}{% else %}no CI information{% endif %}"></span>{{ r.name }}</span>
     <span>{% if r.detail or r.error %}<span class="warn" title="{{ r.error or r.detail }}">!</span> {% endif %}{% if r.needs %}<span class="needs">{{ r.needs }}</span> {% endif %}<span class="n">{{ r.counts.open }}{% if r.counts.ongoing %}+{{ r.counts.ongoing }}{% endif %}</span></span>
   </a>
   {% endfor %}
