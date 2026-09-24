@@ -29,8 +29,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data-dir", type=Path, default=None, metavar="DIR",
                         help="Where the clones live (default: from config, or ~/.local/share/tv/mirrors).")
     parser.add_argument("--owner", default=None, help="Handle written on your entries.")
-    parser.add_argument("--host", default=None)
-    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--host", default=None,
+                        help="Address to bind (default: from config, or 127.0.0.1).")
+    parser.add_argument("--port", type=int, default=None,
+                        help="Port to serve on (default: from config, or 8765).")
     args = parser.parse_args(argv)
 
     try:
