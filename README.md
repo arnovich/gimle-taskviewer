@@ -361,8 +361,30 @@ the default branch, retried from the fresh tip if an agent pushed first.
 
 ```sh
 tv-web --repo https://github.com/arnovich/gimle-mimir.git --repo ...
-# or list them under `repos` in ~/.config/tv/web.toml
 ```
+
+### Which repositories it watches
+
+The list lives in `~/.config/tv/web.toml` (or wherever `--config` points):
+
+```toml
+owner = "erikarne"                       # the handle written on your entries
+repos = [
+  "https://github.com/arnovich/gimle-mimir.git",
+  "https://github.com/arnovich/gimle-asgard.git",
+]
+# data_dir = "~/.local/share/tv/mirrors"  # where the clones live
+# max_age = 60                           # seconds a fetch stays fresh
+# port = 8765
+```
+
+Edit the list and restart `tv-web`; there is no way to change it from the
+page. A repo added there is cloned on the next start, into
+`data_dir/<name>`, where the name is the last part of the URL. A repo
+removed from the list disappears from the pages but its clone stays on disk
+until you delete that folder. `--repo URL` adds a repo for one run, on top
+of the file's list, which is handy for trying a repo before committing it
+to the config.
 
 The dashboard shows **who is waiting on you**, **what is claimed and by
 whom**, and each repo's queue; a task page shows the body, the thread, and a

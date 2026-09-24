@@ -92,9 +92,18 @@ repos = [
 # port = 8765
 ```
 
-Cloning happens once, at startup. Pushes use whatever git credentials the
-machine already has (`gh auth setup-git` is enough); git is run with every
-prompt disabled, so a missing credential fails fast instead of hanging.
+`--repo URL` on the command line adds to that list for one run, and `--config`
+points at a different file. The list is read once, at startup: edit it and
+restart. A repo new to the list is cloned then, into `data_dir/<name>`
+(the last path segment of the URL, without `.git`); two URLs that end the
+same way are refused, since they would share a clone. A repo dropped from
+the list leaves its clone behind — delete the folder yourself. Pushes use
+whatever git credentials the machine already has (`gh auth setup-git` is
+enough); git is run with every prompt disabled, so a missing credential
+fails fast instead of hanging.
+
+If the port is taken, startup fails with git-free wording (`address already
+in use`); set `port` in the config or pass `--port`.
 
 It binds to localhost and has no authentication. Two things are checked
 even there, because a browser on localhost still visits other sites: the
