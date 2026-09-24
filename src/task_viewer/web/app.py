@@ -31,10 +31,15 @@ from ..git_info import describe_age_phrase
 from .control import QUEUE_OPS, ControlError, ControlPlane, InvalidInput, RepoView
 from .director import (
     FEED_LIMIT,
+    SORTS,
     STALE_AFTER,
     agents,
+    arrange,
     attention,
+    ci,
+    created_at,
     feed,
+    main_health,
     next_pick,
     timeline,
     up_next,
@@ -111,6 +116,7 @@ def create_app(control: ControlPlane, allowed_hosts: Iterable[str] = LOCAL_HOSTS
             agents=agents(facts),
             picks=[(v.name, up_next(v.facts)) for v in views],
             events=feed(facts)[:DASHBOARD_EVENTS],
+            ci=ci(facts, _branches(views)),
         )
 
     @app.get("/needs-you", response_class=HTMLResponse)
@@ -133,17 +139,35 @@ def create_app(control: ControlPlane, allowed_hosts: Iterable[str] = LOCAL_HOSTS
         )
 
     @app.get("/r/{repo}", response_class=HTMLResponse)
-    def repo(request: Request, repo: str, closed: bool = False) -> HTMLResponse:
+    def repo(
+        request: Request,
+        repo: str,
+        closed: bool = False,
+        sort: str = "number",
+        dir: str = "asc",
+        q: str = "",
+    ) -> HTMLResponse:
         views = load()
         view = _or_404(lambda: _find(views, repo))
+        sort = sort if sort in SORTS else "number"
+        descending = dir == "desc"
+        shown = arrange(view.facts, view.tasks if closed else view.active, sort, descending, q[:200])
         return page(
             request,
             "repo.html",
             views,
             view=view,
-            tasks=view.tasks if closed else view.active,
+            tasks=shown,
             closed=closed,
+            sort=sort,
+            descending=descending,
+            q=q[:200],
+            sorts=SORTS,
+            created=created_at(view.facts),
             picks=up_next(view.facts),
+            attention=attention([view.facts]),
+            ci=ci([view.facts], _branches(views)),
+            runs=(view.github.runs[:12] if view.github and view.github.runs_ok else []),
         )
 
     @app.get("/r/{repo}/t/{task_id}", response_class=HTMLResponse)
@@ -157,6 +181,7 @@ def create_app(control: ControlPlane, allowed_hosts: Iterable[str] = LOCAL_HOSTS
             views,
             view=view,
             task=found,
+            pull=attention([view.facts]).pull_for(repo, found),
             body_html=_render_markdown(_without_title(strip_thread(found.body))),
             entries=found.conversation,
             events=timeline(view.facts, found),
@@ -190,6 +215,10 @@ def create_app(control: ControlPlane, allowed_hosts: Iterable[str] = LOCAL_HOSTS
     return app
 
 
+def _branches(views: list[RepoView]) -> dict[str, str | None]:
+    return {v.name: v.mirror.branch for v in views}
+
+
 def _find(views: list[RepoView], name: str) -> RepoView:
     for view in views:
         if view.name == name:
@@ -205,12 +234,17 @@ def _nav(views: list[RepoView]) -> dict:
     for view in views:
         needs = attention([view.facts]).count
         total += needs
+        detail = view.refresh.detail if view.refresh else ""
+        if view.github is not None and not view.github.ok:
+            detail = f"{detail} · " if detail else ""
+            detail += f"GitHub: {view.github.error}"
         rows.append({
             "name": view.name,
             "counts": view.counts,
             "needs": needs,
             "error": view.error,
-            "detail": view.refresh.detail if view.refresh else "",
+            "detail": detail,
+            "ci": main_health(view.facts, view.mirror.branch),
         })
         if view.refresh and view.refresh.at and (checked is None or view.refresh.at > checked):
             checked = view.refresh.at

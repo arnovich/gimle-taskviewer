@@ -8,14 +8,16 @@ branch — the same metadata-only exception to "never commit to main" that a
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..conversation import ConversationError, Entry, new_entry
 from ..conversation import append as append_entry
 from ..discovery import STATES, Task, is_tasks_dir, load_tasks
+from ..github import Snapshot, fetch as fetch_github, slug_of
 from ..history import Commit, branch_tips, task_commits
 from ..mirror import DEFAULT_MAX_AGE, Mirror, MirrorError, RefreshResult
 from ..queue_ops import QueueError, clear_next, enqueue, metadata_file, promote
@@ -25,6 +27,12 @@ from .director import RepoFacts
 _ACTIVE = ("open", "ongoing")
 
 QUEUE_OPS = ("enqueue", "promote", "unqueue")
+
+# GitHub is slower to change than the repos and shares a rate-limit budget
+# with every agent on the same login, so it is asked less often than git —
+# and after an error, less often still.
+GITHUB_MAX_AGE = timedelta(minutes=3)
+GITHUB_BACKOFF = timedelta(minutes=10)
 
 
 class ControlError(Exception):
@@ -45,6 +53,7 @@ class RepoView:
     error: str = ""
     commits: list[Commit] = field(default_factory=list)
     branch_tips: dict[str, datetime] = field(default_factory=dict)
+    github: Snapshot | None = None  # None: not a GitHub remote, or never asked
 
     @property
     def name(self) -> str:
@@ -52,7 +61,7 @@ class RepoView:
 
     @property
     def facts(self) -> RepoFacts:
-        return RepoFacts(self.name, self.tasks, self.commits, self.branch_tips)
+        return RepoFacts(self.name, self.tasks, self.commits, self.branch_tips, self.github)
 
     @property
     def active(self) -> list[Task]:
@@ -78,12 +87,20 @@ class ControlPlane:
     """The mirrors, plus the owner's identity for what they write."""
 
     def __init__(
-        self, mirrors: list[Mirror], owner: str, max_age: float = DEFAULT_MAX_AGE
+        self,
+        mirrors: list[Mirror],
+        owner: str,
+        max_age: float = DEFAULT_MAX_AGE,
+        github: Callable[[str, str | None], Snapshot] | None = fetch_github,
     ) -> None:
         self.owner = owner
         self.max_age = max_age
         self._mirrors = {mirror.name: mirror for mirror in mirrors}
         self._errors: dict[str, str] = {}
+        # What GitHub said last time, per repo. Asked on its own lazy cadence
+        # (slower than git), forced by Refresh, and never allowed to raise.
+        self._github = github
+        self._snapshots: dict[str, Snapshot] = {}
 
     @property
     def mirrors(self) -> list[Mirror]:
@@ -96,10 +113,15 @@ class ControlPlane:
             raise ControlError(f"no repository called {name!r}") from None
 
     def refresh(self, force: bool = False) -> None:
-        """Bring every mirror up to date, in parallel — one fetch per repo."""
+        """Bring every mirror up to date, in parallel — one fetch per repo.
+
+        GitHub is asked in the same breath, on its own slower cadence, so
+        browsing never costs more than one git round trip per repo per
+        ``max_age`` and one gh round trip per repo per ``GITHUB_MAX_AGE``.
+        """
         with ThreadPoolExecutor(max_workers=min(8, max(1, len(self._mirrors)))) as pool:
             futures = {
-                pool.submit(mirror.refresh, self.max_age, force): mirror
+                pool.submit(self._refresh_one, mirror, force): mirror
                 for mirror in self._mirrors.values()
             }
             for future, mirror in futures.items():
@@ -108,6 +130,26 @@ class ControlPlane:
                     self._errors.pop(mirror.name, None)
                 except MirrorError as error:
                     self._errors[mirror.name] = str(error)
+
+    def _refresh_one(self, mirror: Mirror, force: bool) -> None:
+        mirror.refresh(self.max_age, force)
+        slug = slug_of(mirror.url)
+        if slug is None or self._github is None:
+            return
+        if force or self._github_stale(mirror.name):
+            try:
+                snapshot = self._github(slug, mirror.branch)
+            except Exception as error:  # noqa: BLE001 - GitHub must never take the pages down
+                message = f"could not ask GitHub: {error}"
+                snapshot = Snapshot(checked=datetime.now(timezone.utc), runs_error=message, pulls_error=message)
+            self._snapshots[mirror.name] = snapshot
+
+    def _github_stale(self, name: str) -> bool:
+        snapshot = self._snapshots.get(name)
+        if snapshot is None or snapshot.checked is None:
+            return True
+        wait = GITHUB_MAX_AGE if snapshot.ok else GITHUB_BACKOFF
+        return datetime.now(timezone.utc) - snapshot.checked > wait
 
     def overview(self) -> list[RepoView]:
         """Every repo with all of its tasks, read while the checkout holds still."""
@@ -124,7 +166,10 @@ class ControlPlane:
 
     def _view(self, mirror: Mirror) -> RepoView:
         view = RepoView(
-            mirror, refresh=mirror.last_refresh, error=self._errors.get(mirror.name, "")
+            mirror,
+            refresh=mirror.last_refresh,
+            error=self._errors.get(mirror.name, ""),
+            github=self._snapshots.get(mirror.name),
         )
         with mirror.locked():
             if is_tasks_dir(mirror.tasks_dir):
