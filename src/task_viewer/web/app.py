@@ -29,6 +29,7 @@ from ..conversation import KINDS, strip_thread
 from ..discovery import Task
 from ..git_info import describe_age_phrase
 from .control import QUEUE_OPS, ControlError, ControlPlane, InvalidInput
+from .director import STALE_AFTER, agents, attention, feed, timeline, up_next
 
 _TEMPLATES = Path(__file__).parent / "templates"
 
@@ -75,6 +76,7 @@ def create_app(control: ControlPlane, allowed_hosts: Iterable[str] = LOCAL_HOSTS
     templates.env.globals["repo_url"] = _repo_url
     templates.env.globals["task_url"] = _task_url
     templates.env.globals["github_url"] = _github_url
+    templates.env.globals["stale_after"] = f"{int(STALE_AFTER.total_seconds() // 3600)}h"
 
     def page(request: Request, name: str, **context) -> HTMLResponse:
         return templates.TemplateResponse(request, name, context)
@@ -83,14 +85,15 @@ def create_app(control: ControlPlane, allowed_hosts: Iterable[str] = LOCAL_HOSTS
     def dashboard(request: Request) -> HTMLResponse:
         control.refresh()
         views = control.overview()
-        waiting = control.waiting(views)
+        facts = [v.facts for v in views]
         return page(
             request,
             "index.html",
             views=views,
-            needs_owner=[w for w in waiting if w.on_owner],
-            needs_agent=[w for w in waiting if not w.on_owner],
-            ongoing=[(v.name, t) for v in views for t in v.ongoing],
+            attention=attention(facts),
+            agents=agents(facts),
+            picks=[(v.name, up_next(v.facts)) for v in views],
+            events=feed(facts),
         )
 
     @app.get("/r/{repo}", response_class=HTMLResponse)
@@ -117,6 +120,7 @@ def create_app(control: ControlPlane, allowed_hosts: Iterable[str] = LOCAL_HOSTS
             task=found,
             body_html=_render_markdown(_without_title(strip_thread(found.body))),
             entries=found.conversation,
+            events=timeline(view.facts, found),
             question=found.open_question,
             queue_ops=QUEUE_OPS,
         )

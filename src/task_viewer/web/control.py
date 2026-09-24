@@ -10,14 +10,17 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from ..conversation import ConversationError, Entry, new_entry
 from ..conversation import append as append_entry
 from ..discovery import STATES, Task, is_tasks_dir, load_tasks
+from ..history import Commit, branch_tips, task_commits
 from ..mirror import DEFAULT_MAX_AGE, Mirror, MirrorError, RefreshResult
 from ..queue_ops import QueueError, clear_next, enqueue, metadata_file, promote
 from ..textfile import TextFileError
+from .director import RepoFacts
 
 _ACTIVE = ("open", "ongoing")
 
@@ -40,10 +43,16 @@ class RepoView:
     tasks: list[Task] = field(default_factory=list)
     refresh: RefreshResult | None = None
     error: str = ""
+    commits: list[Commit] = field(default_factory=list)
+    branch_tips: dict[str, datetime] = field(default_factory=dict)
 
     @property
     def name(self) -> str:
         return self.mirror.name
+
+    @property
+    def facts(self) -> RepoFacts:
+        return RepoFacts(self.name, self.tasks, self.commits, self.branch_tips)
 
     @property
     def active(self) -> list[Task]:
@@ -63,20 +72,6 @@ class RepoView:
         for task in self.tasks:
             counts[task.state] += 1
         return counts
-
-
-@dataclass(frozen=True)
-class Waiting:
-    """A task whose thread ends in a question nobody has answered."""
-
-    repo: str
-    task: Task
-    question: Entry
-
-    @property
-    def on_owner(self) -> bool:
-        """An agent asked, so the owner answers. Decided by the handle's shape."""
-        return self.question.by_agent
 
 
 class ControlPlane:
@@ -118,23 +113,6 @@ class ControlPlane:
         """Every repo with all of its tasks, read while the checkout holds still."""
         return [self._view(mirror) for mirror in self._mirrors.values()]
 
-    def waiting(self, views: list[RepoView] | None = None) -> list[Waiting]:
-        """Every open question across the repos, the oldest first.
-
-        Closed tasks count too: grind closes a task when its PR opens, and a
-        question the owner asks at that stage lands on a closed task.
-        """
-        found = []
-        for view in views or self.overview():
-            for task in view.tasks:
-                question = task.open_question
-                if question is not None:
-                    found.append(Waiting(view.name, task, question))
-        found.sort(
-            key=lambda w: (w.question.when is None, w.question.when or 0, w.task.sort_key)
-        )
-        return found
-
     def repo(self, name: str) -> RepoView:
         return self._view(self.mirror(name))
 
@@ -153,6 +131,9 @@ class ControlPlane:
                 view.tasks = load_tasks(mirror.tasks_dir)
             elif not view.error:
                 view.error = "no tasks/ folder"
+            if (mirror.root / ".git").exists():
+                view.commits = task_commits(mirror.root)
+                view.branch_tips = branch_tips(mirror.root)
         return view
 
     def reply(self, name: str, task_id: str, kind: str, text: str) -> Entry:

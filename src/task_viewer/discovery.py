@@ -79,6 +79,23 @@ class Task:
         return open_question(self.conversation)
 
     @property
+    def attempts(self) -> int:
+        """How many dated entries the ``## Attempts`` section lists.
+
+        Two and the grind loop leaves the task alone, which makes it the
+        owner's problem — so it is worth showing.
+        """
+        return _count_attempts(self.description)
+
+    @property
+    def depends_on(self) -> list[str]:
+        """Task ids or numbers this task waits for, as written."""
+        raw = self.meta.get("depends_on") or []
+        if not isinstance(raw, list):
+            raw = [raw]
+        return [str(item) for item in raw]
+
+    @property
     def sort_key(self) -> tuple[int, str]:
         """Sort numerically by leading id number when present, else by name."""
         number = self.number
@@ -228,6 +245,22 @@ def _build_task(
         meta=dict(meta),
         description=(body if description is None else description).strip(),
     )
+
+
+_ATTEMPTS_RE = re.compile(r"^##[ \t]+Attempts[ \t]*$", re.IGNORECASE | re.MULTILINE)
+_LEVEL2_RE = re.compile(r"^##[ \t]+\S", re.MULTILINE)
+_BULLET_RE = re.compile(r"^[-*][ \t]+\S", re.MULTILINE)
+
+
+def _count_attempts(body: str) -> int:
+    match = _ATTEMPTS_RE.search(body)
+    if match is None:
+        return 0
+    section = body[match.end():]
+    end = _LEVEL2_RE.search(section)
+    if end is not None:
+        section = section[: end.start()]
+    return len(_BULLET_RE.findall(section))
 
 
 def _as_rank(value: object) -> int | None:
