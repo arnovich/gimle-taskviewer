@@ -29,7 +29,7 @@ Four pieces, each with one job:
 | **`tv`** | this repo | rank the queue, watch the worktrees, review and merge the PRs |
 
 A repo joins by creating `tasks/open/` and pasting a pointer into its
-`CLAUDE.md`. Nothing needs registering: `tv` lists any folder with tasks, and
+`AGENTS.md`. Nothing needs registering: `tv` lists any folder with tasks, and
 `grind` is installed workspace-wide. See *Setting up a new repo* in the standard.
 
 ## Task layout
