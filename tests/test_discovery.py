@@ -84,3 +84,51 @@ def test_a_task_without_a_leading_number_has_none(tmp_path: Path) -> None:
 
     task = load_tasks(tmp_path / "tasks")[0]
     assert task.number is None
+
+
+def test_symlinks_are_never_followed(tmp_path: Path) -> None:
+    """A task file that is a link would render, and on edit publish, any file."""
+    from task_viewer.discovery import count_states, is_tasks_dir, load_tasks
+
+    secret = tmp_path / "secret.md"
+    secret.write_text("---\ntitle: Secret\n---\n\nhunter2\n", encoding="utf-8")
+    open_dir = tmp_path / "proj" / "tasks" / "open"
+    open_dir.mkdir(parents=True)
+    (open_dir / "001-real.md").write_text("# Real\n", encoding="utf-8")
+    (open_dir / "002-link.md").symlink_to(secret)
+    (open_dir / "003-dir").symlink_to(tmp_path)  # a directory task pointing anywhere
+    dir_task = open_dir / "004-dir"
+    dir_task.mkdir()
+    (dir_task / "description.md").write_text("---\ntitle: Dir\n---\n\nReal part.\n")
+    (dir_task / "plan.md").symlink_to(secret)
+
+    tasks = load_tasks(tmp_path / "proj" / "tasks", ("open",))
+    assert [t.task_id for t in tasks] == ["001-real", "004-dir"]
+    assert "hunter2" not in tasks[1].body
+    assert count_states(tmp_path / "proj" / "tasks")["open"] == 2
+
+    linked_tasks = tmp_path / "other" / "tasks"
+    linked_tasks.parent.mkdir()
+    linked_tasks.symlink_to(tmp_path / "proj" / "tasks")
+    assert not is_tasks_dir(linked_tasks)
+
+
+def test_a_directory_task_reads_its_thread_from_the_description_only(tmp_path: Path) -> None:
+    from task_viewer.discovery import load_tasks
+
+    task = tmp_path / "tasks" / "open" / "010-dir"
+    task.mkdir(parents=True)
+    (task / "description.md").write_text(
+        "---\ntitle: Dir\n---\n\nDescribed.\n\n## Conversation\n\n"
+        "### question · claude/abc · 2026-09-24\n\nWhich?\n",
+        encoding="utf-8",
+    )
+    (task / "plan.md").write_text(
+        "Plan.\n\n## Conversation\n\n### answer · erikarne · 2026-09-25\n\nNot here.\n",
+        encoding="utf-8",
+    )
+    (loaded,) = load_tasks(tmp_path / "tasks", ("open",))
+    assert loaded.description.startswith("Described.")
+    assert [e.kind for e in loaded.conversation] == ["question"]
+    assert loaded.open_question is not None
+    assert "Plan." in loaded.body  # the fragments are still all shown

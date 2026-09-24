@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tomllib
 from dataclasses import dataclass, field
@@ -61,11 +62,19 @@ def load_config(path: Path | None) -> Config:
     config.owner = str(data.get("owner", "") or "")
     if "data_dir" in data:
         config.data_dir = Path(str(data["data_dir"])).expanduser()
-    if "max_age" in data:
-        config.max_age = float(data["max_age"])
+    try:
+        if "max_age" in data:
+            config.max_age = float(data["max_age"])
+        config.port = int(data.get("port", config.port))
+    except (TypeError, ValueError) as error:
+        raise ConfigError(f"{path}: `max_age` and `port` must be numbers") from error
     config.host = str(data.get("host", config.host))
-    config.port = int(data.get("port", config.port))
     return config
+
+
+# The handle is written into a heading between separators, so it must not
+# contain one — nor a space, nor anything a second reader could split on.
+_HANDLE_RE = re.compile(r"[^A-Za-z0-9._/@-]+")
 
 
 def resolve_owner(configured: str) -> str:
@@ -75,7 +84,7 @@ def resolve_owner(configured: str) -> str:
     out, since an author is one token; otherwise ``owner``.
     """
     if configured.strip():
-        return configured.strip()
+        return _handle(configured)
     try:
         proc = subprocess.run(
             ["git", "config", "--get", "user.name"],
@@ -83,5 +92,10 @@ def resolve_owner(configured: str) -> str:
         )
     except (OSError, subprocess.SubprocessError):
         return "owner"
-    name = "-".join(proc.stdout.split()) if proc.returncode == 0 else ""
+    name = _handle(proc.stdout) if proc.returncode == 0 else ""
     return name or "owner"
+
+
+def _handle(text: str) -> str:
+    """One token of safe characters, or ``""`` when nothing survives."""
+    return _HANDLE_RE.sub("-", text.strip()).strip("-")

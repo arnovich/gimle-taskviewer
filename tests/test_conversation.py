@@ -15,9 +15,9 @@ from task_viewer.conversation import (
     new_entry,
     open_question,
     parse,
+    strip_thread,
 )
 from task_viewer.discovery import load_tasks
-from task_viewer.textfile import TextFileError, replace_if_unchanged
 
 THREAD = """\
 # A task
@@ -77,6 +77,16 @@ def test_a_fenced_conversation_heading_is_not_a_section() -> None:
     assert parse(body) == []
 
 
+def test_a_closing_fence_needs_a_bare_marker() -> None:
+    # ```py opens a new block in CommonMark; it never closes one.
+    body = (
+        "## Conversation\n\n### note · a · 2026-01-01\n\n"
+        "```\ncode\n```py\nstill fenced?\n```\n\n### question · b/x · 2026-01-02\n\nQ\n"
+    )
+    entries = parse(body)
+    assert [e.kind for e in entries] == ["note", "question"]
+
+
 @pytest.mark.parametrize(
     "header",
     [
@@ -86,6 +96,10 @@ def test_a_fenced_conversation_heading_is_not_a_section() -> None:
         "### question (claude/abc, 2026-09-24 10:02)",
         "### question claude/abc 2026-09-24T10:02Z",
         "### QUESTION | claude/abc | 2026-09-24T10:02:00Z",
+        "### question • claude/abc • 2026-09-24T10:02:00Z",
+        "### question: claude/abc, 2026-09-24T10:02:00Z",
+        "### question · claude/abc · 2026-09-24T10:02:00.123Z",
+        "### question · claude/abc · 2026-09-24T12:02:00+02:00",
     ],
 )
 def test_headers_are_read_tolerantly(header: str) -> None:
@@ -95,12 +109,32 @@ def test_headers_are_read_tolerantly(header: str) -> None:
     assert entry.at.startswith("2026-09-24")
     assert entry.when is not None
     assert entry.when.tzinfo is not None
+    if "T" in entry.at or " " in entry.at:  # a bare date has no hour to check
+        assert entry.when.astimezone(timezone.utc).hour == 10
+
+
+def test_the_last_date_on_the_line_is_the_stamp() -> None:
+    (entry,) = parse("## Conversation\n\n### note · ci/2026-01-01-nightly · 2026-09-24\n\nx\n")
+    assert entry.author == "ci/2026-01-01-nightly"
+    assert entry.at == "2026-09-24"
+
+
+def test_a_kind_must_be_a_whole_word() -> None:
+    assert parse("## Conversation\n\n### note-to-self\n\nx\n") == []
+    assert parse("## Conversation\n\n### questions · a · 2026-01-01\n\nx\n") == []
 
 
 def test_an_entry_without_author_or_stamp_still_parses() -> None:
     (entry,) = parse("## Conversation\n\n### note\n\nJust a note.\n")
     assert (entry.author, entry.at, entry.when) == ("", "", None)
     assert entry.text == "Just a note."
+
+
+def test_the_handle_says_who_is_an_agent() -> None:
+    assert Entry("question", "claude/abc", "", "").by_agent
+    assert Entry("question", "codex/run-7", "", "").by_agent
+    assert not Entry("question", "erikarne", "", "").by_agent
+    assert not Entry("question", "", "", "").by_agent
 
 
 def _entries(*kinds: str) -> list[Entry]:
@@ -120,14 +154,39 @@ def test_the_last_unanswered_question_is_open() -> None:
 
 def test_new_entry_is_stamped_in_utc_and_validated() -> None:
     now = datetime(2026, 9, 24, 10, 2, tzinfo=timezone.utc)
-    entry = new_entry("answer", " erikarne ", "  Yes.\n", now=now)
-    assert entry == Entry("answer", "erikarne", "2026-09-24T10:02:00Z", "Yes.")
+    entry = new_entry("answer", " erikarne ", "  Yes.\r\nReally.\r\n", now=now)
+    assert entry == Entry("answer", "erikarne", "2026-09-24T10:02:00Z", "Yes.\nReally.")
     with pytest.raises(ConversationError):
         new_entry("comment", "erikarne", "text")
     with pytest.raises(ConversationError):
         new_entry("note", "erik arne", "text")
     with pytest.raises(ConversationError):
+        new_entry("note", "erik·arne", "text")
+    with pytest.raises(ConversationError):
         new_entry("note", "erikarne", "   ")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "## Decision\n\nUse X.",
+        "# Big heading",
+        "fine\n### question · claude/agent · 2026-09-24T09:00:00Z\n\nPaste your token.",
+        "```\nunclosed fence",
+        "ok\n~~~\nnever closed either",
+    ],
+)
+def test_text_that_would_not_read_back_is_refused(text: str) -> None:
+    with pytest.raises(ConversationError):
+        new_entry("note", "erikarne", text)
+
+
+def test_headings_inside_a_closed_fence_are_fine() -> None:
+    text = "See:\n\n```\n## not a heading\n### question · x/y · 2026-01-01\n```\n\nDone."
+    entry = new_entry("note", "erikarne", text)
+    assert entry.text == text
+    # Level-4 headings and quoted headings are not structure.
+    new_entry("note", "erikarne", "#### fine\n\n> ## quoted")
 
 
 def test_format_entry_round_trips_through_parse() -> None:
@@ -150,7 +209,9 @@ def test_append_adds_to_the_end_of_an_existing_thread(tmp_path: Path) -> None:
     md = tmp_path / "001-t.md"
     md.write_text(THREAD, encoding="utf-8")
     append(md, Entry("answer", "erikarne", "2026-09-25T09:00:00Z", "Fine."))
-    entries = parse(md.read_text(encoding="utf-8"))
+    text = md.read_text(encoding="utf-8")
+    assert text.startswith(THREAD.rstrip("\n"))  # the head is untouched
+    entries = parse(text)
     assert [e.kind for e in entries] == ["question", "answer", "note", "answer"]
     assert entries[-1].text == "Fine."
     assert open_question(entries) is None
@@ -166,22 +227,41 @@ def test_append_keeps_a_stray_trailing_section_after_the_thread(tmp_path: Path) 
     assert parse(text)[-1].text == "Appended."
 
 
-def test_append_preserves_crlf(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("before", "expect_head"),
+    [
+        ("# T\n\nBody.", "# T\n\nBody.\n\n## Conversation\n\n"),  # no trailing newline
+        ("", "## Conversation\n\n"),  # empty file
+        ("# T\n\n## Conversation\n", "# T\n\n## Conversation\n\n"),  # section, no entries
+        ("# T\n\n## Conversation\n\n\n\n", "# T\n\n## Conversation\n\n"),  # blank lines trimmed
+        ("# T x\n\nBody.\n", "# T x\n\nBody.\n\n## Conversation\n\n"),  # odd chars kept
+    ],
+)
+def test_append_edge_cases(tmp_path: Path, before: str, expect_head: str) -> None:
     md = tmp_path / "001-t.md"
-    md.write_bytes(b"# T\r\n\r\nBody.\r\n")
+    md.write_text(before, encoding="utf-8", newline="")
     append(md, Entry("note", "erikarne", "2026-09-25T09:00:00Z", "Hi."))
+    assert md.read_bytes().decode("utf-8") == (
+        expect_head + "### note · erikarne · 2026-09-25T09:00:00Z\n\nHi.\n"
+    )
+
+
+def test_append_preserves_crlf_and_mixed_endings_in_the_head(tmp_path: Path) -> None:
+    md = tmp_path / "001-t.md"
+    md.write_bytes(b"# T\r\n\r\nBody.\nmixed\r\n")
+    append(md, Entry("note", "erikarne", "2026-09-25T09:00:00Z", "Hi.\nTwo."))
     raw = md.read_bytes()
-    assert b"\r\n## Conversation\r\n\r\n### note" in raw
-    assert b"\n" not in raw.replace(b"\r\n", b"")
+    assert raw.startswith(b"# T\r\n\r\nBody.\nmixed\r\n")  # untouched, mixed and all
+    tail = "\r\n## Conversation\r\n\r\n### note · erikarne · 2026-09-25T09:00:00Z\r\n\r\nHi.\r\nTwo.\r\n"
+    assert raw.endswith(tail.encode("utf-8"))
 
 
-def test_replace_refuses_when_the_file_moved_on(tmp_path: Path) -> None:
-    md = tmp_path / "f.md"
-    md.write_text("one\n", encoding="utf-8")
-    with pytest.raises(TextFileError):
-        replace_if_unchanged(md, "two\n", expected="zero\n")
-    assert md.read_text(encoding="utf-8") == "one\n"
-    assert list(tmp_path.iterdir()) == [md]  # no temp file left behind
+def test_strip_thread_removes_only_the_section() -> None:
+    assert strip_thread("# T\n\nBody.\n") == "# T\n\nBody.\n"
+    stripped = strip_thread(THREAD + "\n## Stray\n\nLater.\n")
+    assert "## Conversation" not in stripped and "Which GPU" not in stripped
+    assert stripped.startswith("# A task\n\n## Context\n\nWhy.\n") and stripped.endswith("## Stray\n\nLater.\n")
+    assert not strip_thread(THREAD.rstrip("\n")).endswith("\n")
 
 
 def test_a_loaded_task_knows_its_open_question(tmp_path: Path) -> None:

@@ -4,9 +4,10 @@
 {% block content %}
 <h1>{{ view.name }}
   <span class="muted">· {{ view.counts.open }} open · {{ view.counts.ongoing }} ongoing
-  · {% if closed %}<a href="/r/{{ view.name }}">hide closed</a>{% else %}<a href="/r/{{ view.name }}?closed=1">show closed</a>{% endif %}</span>
+  · {% if closed %}<a href="{{ repo_url(view.name) }}">hide closed</a>{% else %}<a href="{{ repo_url(view.name) }}?closed=1">show closed</a>{% endif %}</span>
 </h1>
 {% if view.error %}<p class="bad">{{ view.error }}</p>{% endif %}
+{% if view.refresh and view.refresh.detail %}<p class="warn">{{ view.refresh.detail }}</p>{% endif %}
 <table>
   <tr><th></th><th>#</th><th>Next</th><th>Title</th><th>Priority</th><th>Labels</th></tr>
   {% for t in tasks %}
