@@ -38,7 +38,7 @@
   <div class="text">{{ e.text|markdown|safe }}</div>
 </div>
 {% else %}
-<div class="event"><span class="kind">{{ e.kind }}</span>{% if e.pull_request %} <span class="dim">#{{ e.pull_request }}</span>{% endif %} <span class="who">{{ e.who }}</span> <span class="when">{{ e.when|ago }}</span>{% if e.kind == "changed" %} <span class="dim">{{ e.text|truncate(80) }}</span>{% endif %}</div>
+<div class="event"><span class="kind">{{ e.kind }}</span>{% if e.pull_request %} <span class="dim">#{{ e.pull_request }}</span>{% endif %} <span class="who">{{ e.who }}</span> <span class="when">{{ e.when|ago }}</span>{% if e.text %} <span class="dim">— {{ e.text|truncate(100) }}</span>{% endif %}</div>
 {% endif %}
 {% else %}
 <p class="empty">Nothing has happened on this task yet.</p>

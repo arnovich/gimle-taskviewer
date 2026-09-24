@@ -305,14 +305,26 @@ def timeline(repo: RepoFacts, task: Task) -> list[Event]:
 
 
 def _commit_event(repo: str, commit: Commit, task: Task | None) -> Event:
+    """A commit as one line: what happened, to which task, and what it said.
+
+    The message is the PR title for a merge and the subject otherwise, left
+    out when it only repeats the verb. A merge of a branch that is not a
+    task's is named by its branch, so the line still says what landed.
+    """
+    if task is not None:
+        title = task.title
+    elif commit.branch and commit.pull_request:
+        title = commit.branch
+    else:
+        title = f"task {commit.number}" if commit.number else ""
     return Event(
         when=commit.when,
         repo=repo,
         kind=commit.verb,
         who=commit.author,
-        text=commit.detail,
+        text=commit.title if commit.says_more_than_its_verb else "",
         task_id=task.task_id if task else None,
-        task_title=task.title if task else (f"task {commit.number}" if commit.number else ""),
+        task_title=title,
         pull_request=commit.pull_request,
     )
 

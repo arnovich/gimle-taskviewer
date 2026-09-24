@@ -99,12 +99,18 @@ def test_the_feed_merges_commits_and_entries_and_drops_the_duplicate() -> None:
         Commit("1", "erikarne", NOW - timedelta(hours=1), "task 001: answer from erikarne"),
         Commit("2", "claude", NOW - timedelta(hours=2), "task 001: claim"),
         Commit("3", "old", NOW - timedelta(days=30), "task 001: filed"),
-        Commit("4", "gh", NOW - timedelta(hours=3), "Merge pull request #9 from x/task/001_a"),
+        Commit("4", "gh", NOW - timedelta(hours=3), "Merge pull request #9 from x/task/001_a", body="Do the thing"),
+        Commit("5", "gh", NOW - timedelta(hours=4), "Merge pull request #10 from x/feat/other", body="Something else"),
     ]
     events = feed([RepoFacts("r", [task], commits)], now=NOW)
-    assert [(e.kind, e.who) for e in events] == [("answer", "erikarne"), ("claimed", "claude"), ("merged", "gh")]
-    assert events[0].text == "Yes." and events[2].pull_request == 9
-    assert all(e.task_id == "001-a" for e in events)
+    assert [(e.kind, e.who) for e in events] == [
+        ("answer", "erikarne"), ("claimed", "claude"), ("merged", "gh"), ("merged", "gh"),
+    ]
+    assert events[0].text == "Yes."
+    assert events[1].text == ""  # "claim" says nothing beyond the verb
+    assert events[2].pull_request == 9 and events[2].text == "Do the thing" and events[2].task_id == "001-a"
+    # A merge that is not a task's is named by its branch, and still says what landed.
+    assert events[3].task_id is None and events[3].task_title == "feat/other" and events[3].text == "Something else"
 
 
 def test_the_timeline_is_one_tasks_history_oldest_first() -> None:
