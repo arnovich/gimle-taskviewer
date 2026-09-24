@@ -18,10 +18,10 @@ from __future__ import annotations
 
 import os
 import re
-import tempfile
 from pathlib import Path
 
 from .discovery import Task, load_tasks, ordered_fragments
+from .textfile import TextFileError, read_exact, replace_if_unchanged
 
 # Ranks come from the tasks still in play; a closed task keeps its number but
 # stops counting, so finishing one never forces a renumber.
@@ -179,41 +179,19 @@ def _metadata_file(task: Task) -> Path | None:
 
 
 def _read(path: Path) -> str:
-    """Read strictly, preserving line endings.
-
-    Decoding with ``errors="replace"`` and writing back would turn any byte that
-    is not valid UTF-8 into a permanent U+FFFD.
-    """
     try:
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            return handle.read()
-    except UnicodeDecodeError as error:
-        raise QueueError(f"{path.name} is not valid UTF-8; refusing to edit it") from error
+        return read_exact(path)
+    except TextFileError as error:
+        raise QueueError(str(error)) from error
 
 
 def _replace(path: Path, updated: str, expected: str) -> None:
-    """Swap in ``updated``, but only if the file still holds ``expected``.
+    """Swap in ``updated`` only if the file still holds ``expected``.
 
-    Writing in place would truncate the original before the new content lands —
-    a full disk then leaves a shredded task file. And these files have other
-    writers: the groom pass and `grind` both edit them, so a stale write would
-    silently drop someone else's claim.
+    These files have other writers — the groom pass and `grind` both edit
+    them — so a stale write would silently drop someone else's claim.
     """
-    if _read(path) != expected:
-        raise QueueError(f"{path.name} changed on disk — reload and try again")
-    handle = tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        newline="",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    )
     try:
-        with handle:
-            handle.write(updated)
-        os.replace(handle.name, path)
-    except BaseException:
-        Path(handle.name).unlink(missing_ok=True)
-        raise
+        replace_if_unchanged(path, updated, expected)
+    except TextFileError as error:
+        raise QueueError(str(error)) from error

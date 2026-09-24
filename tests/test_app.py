@@ -251,3 +251,20 @@ async def test_queueing_an_unreadable_task_does_not_crash(project: Path) -> None
             assert list(app._notifications)[-1].severity == "error"
         finally:
             target.chmod(0o644)
+
+
+def test_the_row_marks_a_task_waiting_for_an_answer() -> None:
+    thread = "## Conversation\n\n### question · claude/abc · 2026-09-24\n\nWhich?\n"
+    waiting = _task("052-heat", "Waiting")
+    waiting.body = thread
+    assert "[bold yellow]?[/] Waiting" in _format_row(waiting, 3)
+    assert "?" not in _format_row(_task("053-cool", "Quiet"), 3)
+
+
+def test_the_meta_line_names_who_asked() -> None:
+    from task_viewer.app import _meta_line
+
+    task = _task("052-heat", "Waiting")
+    task.body = "## Conversation\n\n### question · claude/abc · 2026-09-24\n\nWhich?\n"
+    assert "**waiting for an answer** from `claude/abc`" in _meta_line(task)
+    assert "waiting" not in _meta_line(_task("053-cool", "Quiet"))
