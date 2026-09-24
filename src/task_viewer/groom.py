@@ -40,7 +40,7 @@ Each task is a markdown file (a few are directories of fragments such as \
 description.md / spec.md / plan.md). The FOLDER is the source of truth for \
 state.
 
-The task file standard is `gimle-skills/references/task-format.md` — read it \
+The task file standard is `~/.agents/references/task-format.md` — read it \
 first if you can reach it. In short: required frontmatter is title, state \
 (lowercase), priority (high | medium | low) and labels; the body needs a \
 `## Context` and a checkable `## Outcome`; filenames are NNN-kebab-slug.md and \
