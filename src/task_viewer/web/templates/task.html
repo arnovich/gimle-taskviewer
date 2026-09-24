@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}{{ task.task_id }}{% endblock %}
+{% block crumbs %}<span class="muted">/ <a href="/r/{{ view.name }}">{{ view.name }}</a> / {{ task.task_id }}</span>{% endblock %}
+{% block content %}
+<h1>{{ task.title }}</h1>
+<p class="muted">
+  <code>{{ task.task_id }}</code> · <em>{{ task.state }}</em>
+  {% if task.next_rank %} · <span class="rank">{{ task.next_rank }}</span> in the queue{% endif %}
+  {% if task.priority %} · priority {{ task.priority }}{% endif %}
+  {% for label in task.labels %} <span class="badge">{{ label }}</span>{% endfor %}
+  {% if task.meta.get("claimed_by") %} · claimed by <code>{{ task.meta["claimed_by"] }}</code> {{ task.meta.get("claimed_at", "")|ago }}{% endif %}
+  {% if task.meta.get("branch") %} on <code>{{ task.meta["branch"] }}</code>{% endif %}
+  {% set gh = github_url(view.mirror.url, task, view.mirror.branch) %}{% if gh %} · <a href="{{ gh }}">on GitHub</a>{% endif %}
+</p>
+{% if question %}
+<p class="warn">Waiting for an answer{% if question.author %} from <code>{{ question.author }}</code>{% else %}{% endif %} — asked by <code>{{ question.author or "?" }}</code> {{ question.when|ago if question.when else question.at }}.</p>
+{% endif %}
+
+<p>
+  {% if task.state != "closed" %}
+  <form class="inline" method="post" action="{{ task_url(view.name, task.task_id) }}/queue">
+    <button name="op" value="promote">Do this first</button>
+    <button name="op" value="enqueue" {% if task.next_rank %}disabled{% endif %}>Add to queue</button>
+    <button name="op" value="unqueue" {% if not task.next_rank %}disabled{% endif %}>Remove from queue</button>
+  </form>
+  {% endif %}
+</p>
+
+<div class="body">{{ body_html|safe }}</div>
+
+<h2>Conversation</h2>
+{% for e in entries %}
+<div class="entry">
+  <div class="head"><span class="badge {{ e.kind }}">{{ e.kind }}</span> <code>{{ e.author or "?" }}</code> <span class="muted">· {{ e.when|ago if e.when else e.at }}</span></div>
+  <div class="text">{{ e.text|markdown|safe }}</div>
+</div>
+{% else %}
+<p class="muted">No entries yet.</p>
+{% endfor %}
+
+<form method="post" action="{{ task_url(view.name, task.task_id) }}/reply">
+  <p>
+    <select name="kind">
+      {% for k in kinds %}<option value="{{ k }}" {% if (question and k == "answer") or (not question and k == "note") %}selected{% endif %}>{{ k }}</option>{% endfor %}
+    </select>
+    as <code>{{ owner }}</code>
+  </p>
+  <textarea name="text" placeholder="Markdown. This is appended to the task and pushed to {{ view.mirror.branch or 'main' }}." required></textarea>
+  <p><button type="submit">Append and push</button></p>
+</form>
+{% endblock %}

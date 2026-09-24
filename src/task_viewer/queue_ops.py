@@ -84,7 +84,7 @@ def promote(task: Task, tasks_dir: Path) -> int:
 
 def clear_next(task: Task, tasks_dir: Path | None = None) -> None:
     """Take ``task`` out of the queue, removing the field entirely."""
-    md_file = _metadata_file(task)
+    md_file = metadata_file(task)
     if md_file is None:
         return  # Nothing carrying a rank, so nothing to clear.
     original = _read(md_file)
@@ -108,7 +108,7 @@ def _apply(plan: list[tuple[Task, int]], tasks_dir: Path) -> None:
     for task, rank in plan:
         if task.state not in _QUEUED_STATES:
             raise QueueError(f"{task.task_id} is {task.state}; only open or ongoing tasks queue")
-        md_file = _metadata_file(task)
+        md_file = metadata_file(task)
         if md_file is None:
             raise QueueError(f"{task.task_id} has no markdown to edit")
         original = _read(md_file)
@@ -164,7 +164,7 @@ def _ranks_in_play(tasks_dir: Path) -> list[int]:
     return [t.next_rank for t in _queued(tasks_dir) if t.next_rank is not None]
 
 
-def _metadata_file(task: Task) -> Path | None:
+def metadata_file(task: Task) -> Path | None:
     """The file whose frontmatter the loader actually reads.
 
     Follows the loader's own fragment precedence, so a rank is never written to

@@ -44,6 +44,9 @@ class Task:
     priority: str | None = None
     # The owner's work-queue rank. Never written by an agent.
     next_rank: int | None = None
+    # The frontmatter as written, for fields read but not interpreted here
+    # (``claimed_by``, ``branch``, ``depends_on`` ...).
+    meta: dict[str, object] = field(default_factory=dict)
 
     @property
     def number(self) -> str | None:
@@ -189,6 +192,7 @@ def _build_task(
         labels=[str(label) for label in labels],
         priority=str(priority) if priority is not None else None,
         next_rank=_as_rank(meta.get("next")),
+        meta=dict(meta),
     )
 
 

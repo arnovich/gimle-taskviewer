@@ -66,7 +66,7 @@ def fetch(root: Path, timeout: float = FETCH_TIMEOUT) -> bool:
     branch deleted on the server keeps a stale tracking ref forever and never
     reads as gone.
     """
-    return _run(root, "fetch", "--quiet", "--prune", "--no-auto-gc", timeout=timeout).ok
+    return run_git(root, "fetch", "--quiet", "--prune", "--no-auto-gc", timeout=timeout).ok
 
 
 def fast_forward(root: Path, refresh: bool = True) -> UpdateResult:
@@ -117,7 +117,7 @@ def fast_forward(root: Path, refresh: bool = True) -> UpdateResult:
             "move them aside first",
         )
 
-    result = _run(root, "merge", "--ff-only", info.upstream, timeout=FETCH_TIMEOUT)
+    result = run_git(root, "merge", "--ff-only", info.upstream, timeout=FETCH_TIMEOUT)
     if not result.ok:
         return UpdateResult(False, _first_line(result.error) or "git refused the merge")
     commits = "commit" if info.unpulled == 1 else "commits"
@@ -131,7 +131,7 @@ def _ignored_clashes(root: Path, upstream: str) -> list[str]:
     *ignored* one. A local ``.env`` is exactly the sort of thing that is
     ignored, exists nowhere else, and would be destroyed without a word.
     """
-    incoming = _run(root, "diff", "--name-only", "-z", f"HEAD..{upstream}", timeout=FETCH_TIMEOUT)
+    incoming = run_git(root, "diff", "--name-only", "-z", f"HEAD..{upstream}", timeout=FETCH_TIMEOUT)
     if not incoming.ok:
         return []
     candidates = [name for name in incoming.out.split("\0") if name and (root / name).exists()]
@@ -139,7 +139,7 @@ def _ignored_clashes(root: Path, upstream: str) -> list[str]:
         return []
     # check-ignore reads paths on stdin, so any number of them is fine, and it
     # exits non-zero simply to mean "none of these are ignored".
-    ignored = _run(
+    ignored = run_git(
         root,
         "check-ignore",
         "--stdin",
@@ -202,10 +202,14 @@ def _config(key: str) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
-def _run(
+def run_git(
     root: Path, *args: str, timeout: float, stdin_text: str | None = None
 ) -> CommandResult:
-    """Run a git command that may touch the network or run hooks."""
+    """Run a git command that may touch the network or run hooks.
+
+    Never prompts, always times out, and is killed if the app quits — which
+    is why the control plane's mirrors route their git through here too.
+    """
     command = ["git", "-C", str(root), *args]
     try:
         child = subprocess.Popen(

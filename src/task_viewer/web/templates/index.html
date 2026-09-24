@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}dashboard{% endblock %}
+{% block content %}
+<h1>Dashboard <span class="muted">· answering as <code>{{ owner }}</code></span></h1>
+
+<h2>Needs you <span class="muted">({{ needs_owner|length }})</span></h2>
+{% if needs_owner %}
+<table>
+  <tr><th>Repo</th><th>Task</th><th>Asked by</th><th>When</th></tr>
+  {% for w in needs_owner %}
+  <tr>
+    <td>{{ w.repo }}</td>
+    <td><a href="{{ task_url(w.repo, w.task.task_id) }}">{{ w.task.title }}</a></td>
+    <td><code>{{ w.question.author or "?" }}</code></td>
+    <td class="num">{{ w.question.when|ago if w.question.when else w.question.at }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}<p class="muted">Nobody is waiting on you.</p>{% endif %}
+
+{% if needs_agent %}
+<h2>You asked, waiting on an agent <span class="muted">({{ needs_agent|length }})</span></h2>
+<table>
+  {% for w in needs_agent %}
+  <tr><td>{{ w.repo }}</td><td><a href="{{ task_url(w.repo, w.task.task_id) }}">{{ w.task.title }}</a></td>
+      <td class="num">{{ w.question.when|ago if w.question.when else w.question.at }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h2>In progress <span class="muted">({{ ongoing|length }})</span></h2>
+{% if ongoing %}
+<table>
+  <tr><th>Repo</th><th>Task</th><th>Claimed by</th><th>Branch</th><th>Since</th></tr>
+  {% for repo, t in ongoing %}
+  <tr>
+    <td>{{ repo }}</td>
+    <td><a href="{{ task_url(repo, t.task_id) }}">{{ t.title }}</a></td>
+    <td><code>{{ t.meta.get("claimed_by", "") }}</code></td>
+    <td><code>{{ t.meta.get("branch", "") }}</code></td>
+    <td class="num">{{ t.meta.get("claimed_at", "")|ago }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}<p class="muted">Nothing is claimed right now.</p>{% endif %}
+
+<h2>Repositories</h2>
+<table>
+  <tr><th>Repo</th><th>Open</th><th>Ongoing</th><th>Queue</th><th>Last reached</th></tr>
+  {% for v in views %}
+  <tr>
+    <td><a href="/r/{{ v.name }}">{{ v.name }}</a>{% if v.error %} <span class="bad">· {{ v.error }}</span>{% endif %}</td>
+    <td class="num">{{ v.counts.open }}</td>
+    <td class="num">{{ v.counts.ongoing }}</td>
+    <td>{% for t in v.queue %}<span class="rank">{{ t.next_rank }}</span> <a href="{{ task_url(v.name, t.task_id) }}">{{ t.title }}</a><br>{% endfor %}</td>
+    <td class="num">{% if v.refresh and v.refresh.at %}{{ v.refresh.at|ago }}{% if not v.refresh.reached %} <span class="warn">· unreachable</span>{% endif %}{% else %}never{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}
