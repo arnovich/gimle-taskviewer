@@ -151,6 +151,16 @@ def append(md_file: Path, entry: Entry) -> None:
     replace_if_unchanged(md_file, newline.join(updated) + newline, original)
 
 
+def strip_thread(body: str) -> str:
+    """The body with its ``## Conversation`` section removed."""
+    lines = body.splitlines()
+    bounds = _section_bounds(lines)
+    if bounds is None:
+        return body
+    start, end = bounds
+    return "\n".join(lines[:start] + lines[end:]).rstrip() + ("\n" if body.endswith("\n") else "")
+
+
 def _section_bounds(lines: list[str]) -> tuple[int, int] | None:
     """``(heading index, end index)`` of the section, or ``None`` if absent."""
     start: int | None = None
