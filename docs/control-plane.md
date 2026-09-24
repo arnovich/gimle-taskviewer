@@ -59,9 +59,19 @@ read the thread before retrying a timed-out write.
 
 | Page | Shows | Writes |
 |---|---|---|
-| `/` | **Needs you** — every task whose thread ends in a question you have not answered, oldest first. **In progress** — every `ongoing` task, who claimed it, on which branch, since when. **Repositories** — counts, the queue per repo, when each remote was last reached. | Refresh |
+| `/` | **Needs you** — everything that is your move, as one count: questions agents asked, closed tasks whose branch is still on the remote (a PR waiting to merge), tasks agents gave up on after two attempts, and numbers two tasks share. **Waiting on an agent** — your own open questions. **Running now** — one card per agent handle: what it holds, when it was last seen (its branch tip, its last entry, its claim), its last note as a status line, and a *stale* flag after four quiet hours. **Up next** — each repo's queue as grind reads it, with the reason a task would be skipped and the one it would take next. **Activity** — the last seven days across all repos: claims, plans, closes, merges, questions, answers, notes. **Repositories** — counts and when each remote was last reached. | Refresh |
 | `/r/<repo>` | The repo's active tasks (closed on request), with rank, priority, labels and the `?` marker | — |
-| `/r/<repo>/t/<id>` | The task body, the conversation as entries, claim details, a link to the file on GitHub | Append an entry · Do this first / Add to queue / Remove from queue |
+| `/r/<repo>/t/<id>` | The task body, then its history: every commit that touched it on the default branch and every entry of its conversation, in one timeline; claim details; a link to the file on GitHub | Append an entry · Do this first / Add to queue / Remove from queue |
+
+All of that is read from the repositories and nothing else. The git log is the
+activity log: every grind step is a commit on the default branch with a
+structured subject (`task 053: claim`, `task 053: plan`, `task 053: closed`),
+the control plane's own writes follow the same shape, and GitHub's merge
+commits name the branch they merged, so a pull request landing is one event.
+A task's remote branch is the closest thing to a heartbeat there is: the agent
+works there, and every push moves the tip. Notes agents leave in the thread
+become the status line on their card, which is why the grind skill should
+leave one at each step of a lap.
 
 "Needs you" is derived, never stored: the last `question` with no `answer`
 after it is open, and the task waits on whoever did not ask. Who asked is

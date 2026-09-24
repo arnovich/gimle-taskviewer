@@ -172,6 +172,50 @@
   .entry .text > :last-child { margin-bottom: 0; }
   .entry .text pre { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: .6rem .8rem; overflow: auto; font-size: .85rem; }
 
+  h3 { font-size: .95rem; font-weight: 600; margin: 1.4rem 0 .4rem; }
+  h3 + .lede { margin-top: -.2rem; }
+
+  /* Running now: one block per agent. */
+  .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr)); gap: .75rem; }
+  .agent { border: 1px solid var(--line); border-radius: 6px; padding: .6rem .8rem; background: var(--surface); }
+  .agent.stale { border-color: var(--amber); }
+  .agent .who { display: flex; flex-wrap: wrap; gap: .4rem .8rem; align-items: baseline; }
+  .agent .handle { font-family: var(--mono); font-size: .9rem; font-weight: 600; }
+  .agent .seen { color: var(--muted); font-size: .85rem; }
+  .agent .flag { color: var(--amber); font-weight: 650; }
+  .agent .holds { list-style: none; margin: .4rem 0 0; padding: 0; }
+  .agent .holds li { padding: .15rem 0; }
+  .agent .status { margin: .5rem 0 0; padding-top: .45rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .9rem; }
+
+  /* Up next: the queues, with the reason a task is held back. */
+  .picks { display: grid; grid-template-columns: repeat(auto-fill, minmax(22rem, 1fr)); gap: .5rem 2rem; }
+  .queue .repo { font-weight: 600; margin: .3rem 0 .2rem; }
+  .queue ol { list-style: none; margin: 0; padding: 0; }
+  .queue li { padding: .2rem 0; display: grid; grid-template-columns: auto 1fr; gap: .5rem; align-items: baseline; }
+  .queue .pick { min-width: 0; }
+  .queue li.held a { color: var(--muted); }
+  .queue li.next .tag { color: var(--bg); background: var(--fg); border-color: var(--fg); }
+  .queue .reason { color: var(--muted); font-size: .85rem; white-space: nowrap; }
+  .queue .reason::before { content: "· "; }
+
+  /* Activity: one line per event. */
+  .feed { list-style: none; margin: 0; padding: 0; }
+  .feed li { display: grid; grid-template-columns: 6.5rem 1fr; gap: .8rem; padding: .35rem 0; border-bottom: 1px solid var(--line); font-size: .93rem; }
+  .feed li:last-child { border-bottom: 0; }
+  .feed .when { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .feed .kind { font-weight: 600; }
+  .feed li.question .kind { color: var(--amber); }
+  .feed li.answer .kind { color: var(--green); }
+  .feed li.merged .kind { color: var(--green); }
+  .feed .who { font-family: var(--mono); font-size: .82rem; color: var(--muted); }
+  .feed .text { color: var(--muted); }
+  .feed .text::before { content: "— "; }
+
+  /* A commit in a task's history: one quiet line between the entries. */
+  .event { padding: .1rem 0 .1rem 1rem; margin: .5rem 0; border-left: 3px solid transparent; font-size: .9rem; color: var(--muted); }
+  .event .kind { font-weight: 600; color: var(--fg); }
+  .event .who { font-family: var(--mono); font-size: .82rem; }
+
   @media (max-width: 40rem) {
     main { padding: 1rem .9rem 3rem; }
     .hero .number { font-size: 2.6rem; }

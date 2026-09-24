@@ -31,42 +31,85 @@ def _task(title: str, state: str = "open", extra: str = "", body: str = "") -> s
     )
 
 
-def _origin(tmp_path: Path, name: str, files: dict[str, str]) -> Path:
+def _origin(tmp_path: Path, name: str, files: dict[str, str], history=(), branches=()) -> Path:
+    """A bare 'GitHub' seeded with ``files``, then ``history`` commits, then branches.
+
+    ``history`` is a list of (subject, {path: text}) applied in order, the way
+    grind's own metadata commits land; ``branches`` is a list of names pushed
+    from the tip, the way a task branch stays on the remote until its PR merges.
+    """
     bare = tmp_path / f"{name}.git"
     bare.mkdir()
     git(bare, "init", "--bare", "-b", "main")
     seed = init_repo(tmp_path / f"{name}-seed")
-    for rel, text in files.items():
-        path = seed / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-    git(seed, "add", "-A")
-    git(seed, "commit", "-m", "Seed tasks")
     git(seed, "remote", "add", "origin", str(bare))
+
+    def commit(subject: str, changes: dict[str, str | None]) -> None:
+        for rel, text in changes.items():
+            path = seed / rel
+            if text is None:
+                path.unlink()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+        git(seed, "add", "-A")
+        git(seed, "commit", "-m", subject)
+
+    commit("Seed tasks", files)
+    for subject, changes in history:
+        commit(subject, changes)
     git(seed, "push", "-q", "origin", "main")
+    for branch in branches:
+        git(seed, "push", "-q", "origin", f"main:refs/heads/{branch}")
     return bare
 
 
 @pytest.fixture
 def world(tmp_path: Path):
-    alpha = _origin(tmp_path, "alpha", {
-        "tasks/open/001-asked.md": _task("Asked", body=QUESTION),
-        "tasks/open/002-queued.md": _task("Queued", extra="next: 1\n"),
-        "tasks/ongoing/003-busy.md": _task(
-            "Busy", "ongoing",
-            "claimed_by: claude/xyz\nclaimed_at: 2026-09-24T09:00:00Z\nbranch: task/003_busy\n",
-        ),
-        "tasks/closed/004-done.md": _task("Done", "closed", extra="next: 5\n"),
-        # Hand-edited stamps: naive, and a bare date. Both must render.
-        "tasks/ongoing/007-naive.md": _task(
-            "Naive", "ongoing", "claimed_by: claude/n\nclaimed_at: 2026-09-24T09:00:00\n"
-        ),
-        "tasks/ongoing/008-dated.md": _task(
-            "Dated", "ongoing", "claimed_by: claude/d\nclaimed_at: 2026-09-24\n"
-        ),
-        "tasks/open/010-dir/description.md": _task("Dir task", body=QUESTION),
-        "tasks/open/010-dir/plan.md": "The plan.\n",
-    })
+    alpha = _origin(
+        tmp_path,
+        "alpha",
+        {
+            "tasks/open/001-asked.md": _task("Asked", body=QUESTION),
+            "tasks/open/002-queued.md": _task("Queued", extra="next: 1\ndepends_on: [001-asked]\n"),
+            "tasks/open/003-busy.md": _task("Busy", extra="next: 2\n"),
+            "tasks/closed/004-done.md": _task("Done", "closed", extra="next: 5\n"),
+            "tasks/open/005-stuck.md": _task(
+                "Stuck", extra="next: 3\n",
+                body="\n## Attempts\n\n- 2026-09-20 — no such module\n- 2026-09-21 — tests hang\n",
+            ),
+            "tasks/open/006-twin-a.md": _task("Twin A"),
+            "tasks/open/006-twin-b.md": _task("Twin B"),
+            "tasks/open/007-free.md": _task("Free", extra="next: 4\n"),
+            # Hand-edited stamps: naive, and a bare date. Both must render.
+            "tasks/ongoing/008-naive.md": _task(
+                "Naive", "ongoing", "claimed_by: claude/n\nclaimed_at: 2026-09-24T09:00:00\n"
+            ),
+            "tasks/ongoing/009-dated.md": _task(
+                "Dated", "ongoing", "claimed_by: claude/d\nclaimed_at: 2026-09-24\n"
+            ),
+            "tasks/open/010-dir/description.md": _task("Dir task", body=QUESTION),
+            "tasks/open/010-dir/plan.md": "The plan.\n",
+        },
+        history=[
+            ("task 003: claim", {
+                "tasks/open/003-busy.md": None,
+                "tasks/ongoing/003-busy.md": _task(
+                    "Busy", "ongoing",
+                    "next: 2\nclaimed_by: claude/xyz\nclaimed_at: 2026-09-24T09:00:00Z\nbranch: task/003_busy\n",
+                ),
+            }),
+            ("task 003: plan", {
+                "tasks/ongoing/003-busy.md": _task(
+                    "Busy", "ongoing",
+                    "next: 2\nclaimed_by: claude/xyz\nclaimed_at: 2026-09-24T09:00:00Z\nbranch: task/003_busy\n",
+                    body="\n## Plan\n\nDo it.\n\n## Conversation\n\n### note · claude/xyz · 2026-09-24T09:30:00Z\n\nPlan written, reviews next.\n",
+                ),
+            }),
+            ("Merge pull request #7 from arnovich/task/004_done", {"README.md": "merged\n"}),
+        ],
+        branches=["task/003_busy", "task/004_done"],
+    )
     beta = _origin(tmp_path, "beta", {
         "tasks/open/001-mine.md": _task(
             "Mine", body="\n## Conversation\n\n### question · erikarne · 2026-09-24T11:00:00Z\n\nStatus?\n"
@@ -107,26 +150,62 @@ def _section(page: str, anchor: str) -> str:
     return page.split(marker, 1)[1].split("<h2", 1)[0]
 
 
-def test_the_dashboard_says_who_is_waiting_and_what_is_running(world) -> None:
+def test_the_dashboard_says_what_is_your_move(world) -> None:
     page = world["client"].get("/").text
     needs_you = _section(page, "needs-you")
-    assert 'class="number">2<' in needs_you  # the file task and the directory task
+    # 2 questions + 1 branch ready to merge + 1 given up + 1 ambiguous number.
+    assert 'class="number">5<' in needs_you
+    assert "2 questions, 1 branch ready to merge, 1 task given up on, 1 ambiguous number" in needs_you
     assert ">Asked<" in needs_you and ">Dir task<" in needs_you and "claude/abc" in needs_you
-    assert "Mine" not in needs_you  # the owner asked that one
+    assert ">Mine<" not in needs_you  # the owner asked that one
+    assert ">Done<" in needs_you and "task/004_done" in needs_you
+    assert ">Stuck<" in needs_you
+    assert ">Twin A<" in needs_you and ">Twin B<" in needs_you
     waiting_on_agent = _section(page, "needs-agent")
-    assert "Mine" in waiting_on_agent and "Late" in waiting_on_agent  # closed tasks count
-    in_progress = _section(page, "in-progress")
-    assert "Busy" in in_progress and "claude/xyz" in in_progress and "task/003_busy" in in_progress
-    assert "Naive" in in_progress and "Dated" in in_progress
+    assert ">Mine<" in waiting_on_agent and ">Late<" in waiting_on_agent  # closed tasks count
+
+
+def test_the_dashboard_shows_who_is_running_and_when_they_were_last_seen(world) -> None:
+    page = world["client"].get("/").text
+    running = _section(page, "in-progress")
+    assert 'class="number">' not in running
+    assert "claude/xyz" in running and ">Busy<" in running
+    assert "task/003_busy" in running  # the branch on the remote is the heartbeat
+    assert "Plan written, reviews next." in running  # the last note is the status line
+    assert "claude/n" in running and ">Naive<" in running
+    assert "claude/d" in running and ">Dated<" in running
+
+
+def test_the_dashboard_shows_the_queue_as_grind_reads_it(world) -> None:
+    page = world["client"].get("/").text
+    up_next = _section(page, "up-next")
+    alpha = up_next.split(">alpha<")[1].split('class="queue"')[0]
+    rows = [line for line in alpha.splitlines() if "<li" in line]
+    assert [r.split("</a>")[0].rsplit(">", 1)[1] for r in rows] == ["Queued", "Busy", "Stuck", "Free"]
+    assert "blocked by 001-asked" in rows[0]
+    assert "claimed by claude/xyz" in rows[1]
+    assert "given up after 2 attempts" in rows[2]
+    assert 'class="next"' in rows[3] and ">next<" in rows[3]
+    assert "Nothing ranked" in up_next.split(">beta<")[1]
+
+
+def test_the_dashboard_lists_what_happened(world) -> None:
+    page = world["client"].get("/").text
+    activity = _section(page, "activity")
+    assert ">claimed<" in activity and ">planned<" in activity
+    assert ">merged<" in activity and "#7" in activity and ">Done<" in activity
+    assert ">note<" in activity and "Plan written, reviews next." in activity
+    # The note's own commit ("task 003: plan") is one event with the entry, not two.
+    assert activity.count("Plan written") == 1
+    assert ">question<" in activity and "Which GPU" in activity
     repos = _section(page, "repositories")
     assert 'href="/r/alpha"' in repos and 'href="/r/beta"' in repos
-    assert "Queued" in repos and "Done" not in repos  # a closed task's rank is ignored
 
 
 def test_the_repo_page_lists_active_tasks_and_can_show_closed(world) -> None:
     client = world["client"]
     page = client.get("/r/alpha").text
-    assert "Asked" in page and "Busy" in page and "Done" not in page
+    assert "Asked" in page and "Busy" in page and ">Done<" not in page
     assert 'class="ask"' in page  # the waiting marker
     assert "Done" in client.get("/r/alpha?closed=1").text
     assert client.get("/r/nope").status_code == 404
@@ -143,6 +222,14 @@ def test_the_task_page_renders_the_body_and_the_thread(world) -> None:
     # The thread is rendered as entries, not as part of the body.
     assert page.count("Which GPU") == 1
     assert 'value="answer" checked' in page
+
+
+def test_the_task_page_tells_the_tasks_history(world) -> None:
+    page = world["client"].get("/r/alpha/t/003-busy").text
+    history = page.split('id="timeline"')[1].split("</form>")[0]
+    assert ">claimed<" in history and ">planned<" in history and "Plan written" in history
+    assert history.index(">claimed<") < history.index(">planned<")  # log order, oldest first
+    assert 'class="event"' in history and 'class="entry note"' in history
 
 
 def test_task_markdown_cannot_inject_html(world, tmp_path: Path) -> None:
@@ -165,7 +252,7 @@ def test_an_answer_is_appended_and_pushed(world) -> None:
     assert _subjects(world["alpha"])[0] == "task 001: answer from erikarne"
     needs_you = _section(client.get("/").text, "needs-you")
     assert ">Asked<" not in needs_you and ">Dir task<" in needs_you
-    assert 'class="number">1<' in needs_you
+    assert 'class="number">4<' in needs_you
 
 
 def test_a_reply_on_a_directory_task_goes_to_the_description(world) -> None:
@@ -209,7 +296,7 @@ def test_cross_site_and_wrong_host_requests_are_refused(world) -> None:
 def test_queue_operations_write_next_and_push(world) -> None:
     client = world["client"]
     assert client.post("/r/alpha/t/001-asked/queue", data={"op": "enqueue"}).status_code == 303
-    assert "next: 2" in _show(world["alpha"], "tasks/open/001-asked.md")
+    assert "next: 5" in _show(world["alpha"], "tasks/open/001-asked.md")  # after ranks 1–4
     assert client.post("/r/alpha/t/001-asked/queue", data={"op": "promote"}).status_code == 303
     assert "next: 1" in _show(world["alpha"], "tasks/open/001-asked.md")
     assert "next: 2" in _show(world["alpha"], "tasks/open/002-queued.md")
