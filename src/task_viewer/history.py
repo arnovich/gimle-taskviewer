@@ -20,9 +20,10 @@ from pathlib import Path
 
 from .remote import FETCH_TIMEOUT, run_git
 
-# One record per commit, fields split by unit separators. `%aI` is the
-# strict ISO author date, which datetime.fromisoformat reads directly.
-_FORMAT = "%x1e%H%x1f%an%x1f%aI%x1f%s"
+# One record per commit, fields split by unit separators; the body comes
+# last because it spans lines, and `--name-only` appends the paths after it.
+# `%aI` is the strict ISO author date, which datetime.fromisoformat reads.
+_FORMAT = "%x1e%H%x1f%an%x1f%aI%x1f%s%x1f%b%x1f"
 
 _TASK_SUBJECT_RE = re.compile(r"^task\s+(\d+)\s*[:\-—]\s*(.*)$", re.IGNORECASE)
 _TASK_PATH_RE = re.compile(r"^tasks/(?:open|ongoing|closed)/(\d+)-")
@@ -31,6 +32,13 @@ _MERGE_RE = re.compile(r"^Merge pull request #(\d+) from \S+?/(\S+)")
 # GitHub appends the number.
 _SQUASH_RE = re.compile(r"\(#(\d+)\)\s*$")
 _BRANCH_NUMBER_RE = re.compile(r"task/(\d+)")
+
+# Titles that only repeat the verb, not worth a message of their own.
+_BARE = frozenset({
+    "claim", "claimed", "plan", "planned", "plan synced", "close", "closed",
+    "reopen", "reopened", "release", "released", "queued", "queued first",
+    "unqueued", "filed", "sync plan", "take main's task file",
+})
 
 # Subject prefixes, in the order they are tried, and the verb they mean.
 _VERBS = (
@@ -58,6 +66,7 @@ class Commit:
     when: datetime
     subject: str
     paths: tuple[str, ...] = ()
+    body: str = ""
 
     @property
     def number(self) -> str | None:
@@ -103,6 +112,32 @@ class Commit:
         """The subject with the ``task NNN:`` prefix removed."""
         match = _TASK_SUBJECT_RE.match(self.subject)
         return match.group(2) if match else self.subject
+
+    @property
+    def branch(self) -> str | None:
+        """The branch a merge commit brought in, when its subject says."""
+        merge = _MERGE_RE.match(self.subject)
+        return merge.group(2) if merge else None
+
+    @property
+    def title(self) -> str:
+        """What to show for this commit: the PR title for a merge, else the subject.
+
+        GitHub's merge commits keep the pull request's title in the message
+        body; a squash merge keeps it in the subject with ``(#N)`` appended.
+        A grind metadata commit says what happened after ``task NNN:``.
+        """
+        if _MERGE_RE.match(self.subject):
+            for line in self.body.splitlines():
+                if line.strip():
+                    return line.strip()
+            return self.branch or self.subject
+        return _SQUASH_RE.sub("", self.detail).strip()
+
+    @property
+    def says_more_than_its_verb(self) -> bool:
+        """False for ``task 053: claim`` — the verb is the whole message."""
+        return self.title.lower().rstrip(".") not in _BARE
 
 
 def task_commits(root: Path, since: datetime | None = None, limit: int = 400) -> list[Commit]:
@@ -158,16 +193,15 @@ def _parse(text: str) -> list[Commit]:
     for record in text.split("\x1e"):
         if not record.strip():
             continue
-        header, _, rest = record.partition("\n")
-        fields = header.split("\x1f")
-        if len(fields) != 4:
+        fields = record.split("\x1f")
+        if len(fields) != 6:
             continue
-        sha, author, stamp, subject = fields
+        sha, author, stamp, subject, body, rest = fields
         when = _when(stamp)
         if when is None:
             continue
         paths = tuple(line.strip() for line in rest.splitlines() if line.strip())
-        commits.append(Commit(sha, author, when, subject, paths))
+        commits.append(Commit(sha.strip(), author, when, subject, paths, body.strip()))
     return commits
 
 
