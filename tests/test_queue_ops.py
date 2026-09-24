@@ -229,34 +229,30 @@ def test_a_read_only_task_leaves_the_queue_untouched(tmp_path: Path) -> None:
         locked.chmod(0o644)
 
 
-def test_a_concurrent_edit_is_refused_rather_than_clobbered(tmp_path: Path) -> None:
+def test_a_concurrent_edit_is_refused_rather_than_clobbered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The groom pass and `grind` edit these files while tv is open."""
-    from task_viewer import queue_ops
+    from task_viewer import textfile
 
     _task(tmp_path, "001-a")
     tasks_dir = tmp_path / "tasks"
     task = load_tasks(tasks_dir)[0]
 
-    real_read = queue_ops._read
-    calls = {"n": 0}
+    real_read = textfile.read_exact
 
     def racing_read(path: Path) -> str:
-        calls["n"] += 1
+        # The swap re-reads before writing; someone else got in between.
         text = real_read(path)
-        if calls["n"] == 2:  # someone else writes between our read and our write
-            path.write_text(
-                text.replace("state: open", "state: ongoing\nclaimed_by: grind-7"),
-                encoding="utf-8",
-            )
-            return real_read(path)
-        return text
+        path.write_text(
+            text.replace("state: open", "state: ongoing\nclaimed_by: grind-7"),
+            encoding="utf-8",
+        )
+        return real_read(path)
 
-    queue_ops._read = racing_read
-    try:
-        with pytest.raises(QueueError):
-            enqueue(task, tasks_dir)
-    finally:
-        queue_ops._read = real_read
+    monkeypatch.setattr(textfile, "read_exact", racing_read)
+    with pytest.raises(QueueError):
+        enqueue(task, tasks_dir)
     assert "claimed_by: grind-7" in (tasks_dir / "open" / "001-a.md").read_text()
 
 

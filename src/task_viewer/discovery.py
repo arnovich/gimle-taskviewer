@@ -4,6 +4,10 @@ A gimle project keeps tasks under ``tasks/open`` and ``tasks/closed``. A task is
 either a single ``*.md`` file or a directory holding several markdown fragments
 (``description.md``, ``spec.md``, ``plan.md`` ...). Both shapes are normalised
 into a :class:`Task`.
+
+Symbolic links are never followed, at any level: a task file is written by
+agents and checked out by git, and a link is a way to make a viewer read — and
+a writer publish — a file that was never in the repository.
 """
 
 from __future__ import annotations
@@ -13,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+from .conversation import Entry, open_question, parse
 
 # States map one-to-one onto the subdirectories of ``tasks/``, in lifecycle order.
 STATES = ("open", "ongoing", "closed")
@@ -42,6 +48,13 @@ class Task:
     priority: str | None = None
     # The owner's work-queue rank. Never written by an agent.
     next_rank: int | None = None
+    # The frontmatter as written, for fields read but not interpreted here
+    # (``claimed_by``, ``branch``, ``depends_on`` ...).
+    meta: dict[str, object] = field(default_factory=dict)
+    # The body of the task's own file: the whole body for a single file, the
+    # ``description.md`` fragment for a directory task. The frontmatter and the
+    # conversation live there, whatever else the directory holds.
+    description: str = ""
 
     @property
     def number(self) -> str | None:
@@ -51,6 +64,36 @@ class Task:
         """
         match = _NUMBER_RE.match(self.task_id)
         return match.group(1) if match else None
+
+    @property
+    def conversation(self) -> list[Entry]:
+        """The thread at the bottom of the task's own file, oldest first."""
+        return parse(self.description)
+
+    @property
+    def open_question(self) -> Entry | None:
+        """The question nobody has answered yet, when there is one.
+
+        Whoever did not ask is who the task is waiting on.
+        """
+        return open_question(self.conversation)
+
+    @property
+    def attempts(self) -> int:
+        """How many dated entries the ``## Attempts`` section lists.
+
+        Two and the grind loop leaves the task alone, which makes it the
+        owner's problem — so it is worth showing.
+        """
+        return _count_attempts(self.description)
+
+    @property
+    def depends_on(self) -> list[str]:
+        """Task ids or numbers this task waits for, as written."""
+        raw = self.meta.get("depends_on") or []
+        if not isinstance(raw, list):
+            raw = [raw]
+        return [str(item) for item in raw]
 
     @property
     def sort_key(self) -> tuple[int, str]:
@@ -79,7 +122,11 @@ def find_tasks_dir(start: Path, folder_name: str = "tasks") -> Path:
 
 def is_tasks_dir(path: Path) -> bool:
     """True if ``path`` is a tasks folder (has an open/ongoing/closed subdir)."""
-    return path.is_dir() and any((path / state).is_dir() for state in STATES)
+    return _real_dir(path) and any(_real_dir(path / state) for state in STATES)
+
+
+def _real_dir(path: Path) -> bool:
+    return path.is_dir() and not path.is_symlink()
 
 
 def count_states(tasks_dir: Path) -> dict[str, int]:
@@ -89,13 +136,15 @@ def count_states(tasks_dir: Path) -> dict[str, int]:
         state_dir = tasks_dir / state
         counts[state] = (
             sum(1 for entry in state_dir.iterdir() if _is_task_entry(entry))
-            if state_dir.is_dir()
+            if _real_dir(state_dir)
             else 0
         )
     return counts
 
 
 def _is_task_entry(entry: Path) -> bool:
+    if entry.is_symlink():
+        return False
     return (entry.is_file() and entry.suffix == ".md") or entry.is_dir()
 
 
@@ -104,10 +153,13 @@ def load_tasks(tasks_dir: Path, states: tuple[str, ...] = STATES) -> list[Task]:
     tasks: list[Task] = []
     for state in states:
         state_dir = tasks_dir / state
-        if not state_dir.is_dir():
+        if not _real_dir(state_dir):
             continue
         for entry in sorted(state_dir.iterdir()):
-            task = _load_entry(entry, state)
+            try:
+                task = _load_entry(entry, state)
+            except FileNotFoundError:
+                continue  # moved between listing and reading; it is someone else's now
             if task is not None:
                 tasks.append(task)
     tasks.sort(
@@ -123,6 +175,8 @@ def load_tasks(tasks_dir: Path, states: tuple[str, ...] = STATES) -> list[Task]:
 
 def _load_entry(entry: Path, state: str) -> Task | None:
     """Turn a file or directory into a :class:`Task`, or ``None`` if unusable."""
+    if not _is_task_entry(entry):
+        return None
     if entry.is_file() and entry.suffix == ".md":
         raw = _read(entry)
         meta, body = _split_frontmatter(raw)
@@ -138,28 +192,42 @@ def _load_dir_entry(entry: Path, state: str) -> Task | None:
     if not fragments:
         return None
     meta: dict = {}
+    description: str | None = None
     sections: list[str] = []
     for fragment in fragments:
         raw = _read(fragment)
         frag_meta, frag_body = _split_frontmatter(raw)
-        # First fragment with frontmatter wins for title/labels/priority.
+        # First fragment with frontmatter wins for title/labels/priority, and
+        # is the task's own file: where the thread is read from and written to.
+        if frag_meta and description is None:
+            description = frag_body
         for key, value in frag_meta.items():
             meta.setdefault(key, value)
         sections.append(f"## _{fragment.stem}_\n\n{frag_body.strip()}")
-    return _build_task(entry.name, state, entry, "\n\n---\n\n".join(sections), meta)
+    body = "\n\n---\n\n".join(sections)
+    return _build_task(entry.name, state, entry, body, meta, description)
 
 
 def ordered_fragments(entry: Path) -> list[Path]:
     """Known fragments first in a stable order, then any other ``*.md`` files."""
-    known = [entry / name for name in _FRAGMENT_ORDER if (entry / name).is_file()]
+    known = [entry / name for name in _FRAGMENT_ORDER if _real_file(entry / name)]
     extras = sorted(
-        f for f in entry.glob("*.md") if f.name not in _FRAGMENT_ORDER
+        f for f in entry.glob("*.md") if f.name not in _FRAGMENT_ORDER and _real_file(f)
     )
     return known + extras
 
 
+def _real_file(path: Path) -> bool:
+    return path.is_file() and not path.is_symlink()
+
+
 def _build_task(
-    task_id: str, state: str, path: Path, body: str, meta: dict
+    task_id: str,
+    state: str,
+    path: Path,
+    body: str,
+    meta: dict,
+    description: str | None = None,
 ) -> Task:
     labels = meta.get("labels") or []
     if isinstance(labels, str):
@@ -174,7 +242,25 @@ def _build_task(
         labels=[str(label) for label in labels],
         priority=str(priority) if priority is not None else None,
         next_rank=_as_rank(meta.get("next")),
+        meta=dict(meta),
+        description=(body if description is None else description).strip(),
     )
+
+
+_ATTEMPTS_RE = re.compile(r"^##[ \t]+Attempts[ \t]*$", re.IGNORECASE | re.MULTILINE)
+_LEVEL2_RE = re.compile(r"^##[ \t]+\S", re.MULTILINE)
+_BULLET_RE = re.compile(r"^[-*][ \t]+\S", re.MULTILINE)
+
+
+def _count_attempts(body: str) -> int:
+    match = _ATTEMPTS_RE.search(body)
+    if match is None:
+        return 0
+    section = body[match.end():]
+    end = _LEVEL2_RE.search(section)
+    if end is not None:
+        section = section[: end.start()]
+    return len(_BULLET_RE.findall(section))
 
 
 def _as_rank(value: object) -> int | None:

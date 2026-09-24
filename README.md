@@ -27,6 +27,8 @@ Four pieces, each with one job:
 | **`next:`** | task frontmatter, set in `tv` | the running order. **Only the owner writes it** |
 | **`grind`** | `~/.agents/skills/grind/` | drains the queue, one task per lap, ending at an open PR |
 | **`tv`** | this repo | rank the queue, watch the worktrees, review and merge the PRs |
+| **`tv-web`** | this repo | the same, from a browser, run from the GitHub repos alone — plus the conversation |
+| **the conversation** | `## Conversation` in a task | how you and the agents talk: questions, answers, notes, in the file |
 
 A repo joins by creating `tasks/open/` and pasting a pointer into its
 `AGENTS.md`. Nothing needs registering: `tv` lists any folder with tasks, and
@@ -329,6 +331,67 @@ renumbering the queue.
 Agents pick tasks up with the `grind` skill, which claims a task on `main`
 before starting so two agents never take the same one. See
 `~/.agents/references/task-format.md` for the full task standard.
+
+## Talking to agents through the task
+
+A task can end in a `## Conversation` section — an append-only thread of
+`question`, `answer` and `note` entries, defined in the task standard. An
+agent that needs a decision asks there and releases the task; you answer
+there; the next lap reads the answer. Nothing about an agent is visible except
+what it writes into tasks, so this is the whole channel.
+
+`tv` marks a task whose thread ends in an unanswered question with a yellow
+`?`, names who asked in the meta line, and counts them in the subtitle:
+
+```
+  ○ 053  1  Batched GPU simulation
+  ○ 051  2  ? Circuit completion via mutation MCTS
+```
+
+Answering from `tv` itself is task 007 in this repo's `tasks/`; until then,
+answer in your editor or in the control plane.
+
+## The control plane: `tv-web`
+
+`tv-web` is `tv` for a browser, and it runs **from the repositories alone**: it
+clones every repo it is given into its own data directory, refreshes them
+lazily when a page is loaded, and writes back the two things you do — answer
+in a task's conversation, and set the queue — as commits pushed straight to
+the default branch, retried from the fresh tip if an agent pushed first.
+
+```sh
+tv-web --repo https://github.com/arnovich/gimle-mimir.git --repo ...
+```
+
+### Which repositories it watches
+
+The list lives in `~/.config/tv/web.toml` (or wherever `--config` points):
+
+```toml
+owner = "erikarne"                       # the handle written on your entries
+repos = [
+  "https://github.com/arnovich/gimle-mimir.git",
+  "https://github.com/arnovich/gimle-asgard.git",
+]
+# data_dir = "~/.local/share/tv/mirrors"  # where the clones live
+# max_age = 60                           # seconds a fetch stays fresh
+# port = 8765
+```
+
+Edit the list and restart `tv-web`; there is no way to change it from the
+page. A repo added there is cloned on the next start, into
+`data_dir/<name>`, where the name is the last part of the URL. A repo
+removed from the list disappears from the pages but its clone stays on disk
+until you delete that folder. `--repo URL` adds a repo for one run, on top
+of the file's list, which is handy for trying a repo before committing it
+to the config.
+
+The dashboard shows **who is waiting on you**, **what is claimed and by
+whom**, and each repo's queue; a task page shows the body, the thread, and a
+reply form. Who asked is read from the handle: an agent's has a `/` in it,
+yours does not. It binds to localhost, checks that requests really come from
+this machine and this origin, and has no login yet. `docs/control-plane.md`
+has the design and what comes next.
 
 ## Working on a task with Claude Code
 

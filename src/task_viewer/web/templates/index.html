@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<div class="hero" id="needs-you">
+  <span class="number{% if not attention.count %} zero{% endif %}">{{ attention.count }}</span>
+  <span class="caption">{% if attention.count %}{{ attention.summary }}{% else %}Nothing is waiting on you.{% endif %}</span>
+  {% if attention.count %}<a class="more" href="/needs-you">See everything</a>{% endif %}
+</div>
+
+{% if attention.questions %}
+<table id="needs-you-list">
+  <thead><tr><th>Repo</th><th>Question</th><th>Asked by</th><th class="num">When</th></tr></thead>
+  <tbody>
+  {% for w in attention.questions %}
+  <tr>
+    <td class="dim">{{ w.repo }}</td>
+    <td><a href="{{ task_url(w.repo, w.task.task_id) }}">{{ w.task.title }}</a><br><span class="muted">{{ w.question.text|truncate(140) }}</span></td>
+    <td><code>{{ w.question.author or "?" }}</code></td>
+    <td class="num dim">{{ w.question.when|ago if w.question.when else w.question.at }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if attention.ready %}
+<details>
+  <summary><span class="n">{{ attention.ready|length }}</span> {{ "branch" if attention.ready|length == 1 else "branches" }} ready to merge <span class="hint">closed tasks whose branch is still on the remote</span></summary>
+  <div class="inner"><table id="ready-list"><tbody>
+  {% for r in attention.ready %}
+  <tr><td class="dim">{{ r.repo }}</td><td><a href="{{ task_url(r.repo, r.task.task_id) }}">{{ r.task.title }}</a></td><td><code>{{ r.branch }}</code></td><td class="num dim">{{ r.since|ago }}</td></tr>
+  {% endfor %}
+  </tbody></table></div>
+</details>
+{% endif %}
+{% if attention.gave_up %}
+<details>
+  <summary><span class="n">{{ attention.gave_up|length }}</span> given up on <span class="hint">two failed attempts each</span></summary>
+  <div class="inner"><table id="gave-up-list"><tbody>
+  {% for g in attention.gave_up %}
+  <tr><td class="dim">{{ g.repo }}</td><td><a href="{{ task_url(g.repo, g.task.task_id) }}">{{ g.task.title }}</a></td><td class="num dim">{{ g.attempts }} attempts</td></tr>
+  {% endfor %}
+  </tbody></table></div>
+</details>
+{% endif %}
+{% if attention.ambiguous %}
+<details>
+  <summary><span class="n">{{ attention.ambiguous|length }}</span> ambiguous {{ "number" if attention.ambiguous|length == 1 else "numbers" }} <span class="hint">two tasks share one; no agent will touch either</span></summary>
+  <div class="inner"><table id="ambiguous-list"><tbody>
+  {% for a in attention.ambiguous %}
+  <tr><td class="dim">{{ a.repo }}</td><td class="id">{{ a.number }}</td><td>{% for t in a.tasks %}<a href="{{ task_url(a.repo, t.task_id) }}">{{ t.title }}</a>{% if not loop.last %}<br>{% endif %}{% endfor %}</td></tr>
+  {% endfor %}
+  </tbody></table></div>
+</details>
+{% endif %}
+
+<div class="cols">
+<section>
+<h2 id="in-progress">Running now <span class="count">{{ agents|length }}</span></h2>
+{% if agents %}
+<div class="agents" id="in-progress-list">
+{% for a in agents %}
+  <div class="agent{% if a.stale %} stale{% endif %}">
+    <div class="who"><span class="handle">{{ a.handle }}</span>
+      <span class="seen">{% if a.stale %}<span class="flag">stale</span> {% endif %}seen {{ a.last_seen|ago if a.last_seen else "never" }}{% if a.last_commit %}, committed to <code>{{ a.last_branch }}</code> {{ a.last_commit|ago }}{% endif %}</span></div>
+    <ul class="holds">
+    {% for repo, t in a.holds %}
+      <li><span class="muted">{{ repo }}</span> <a href="{{ task_url(repo, t.task_id) }}">{{ t.title }}</a></li>
+    {% endfor %}
+    </ul>
+    {% if a.last_entry %}<p class="status">{{ a.last_entry.kind }} {{ a.last_entry.when|ago }}: {{ a.last_entry.text|truncate(120) }}</p>{% endif %}
+  </div>
+{% endfor %}
+</div>
+{% else %}<p class="empty">Nothing is claimed right now.</p>{% endif %}
+</section>
+
+<section>
+<h2 id="up-next">Up next</h2>
+<ul class="nexts">
+{% for repo, ranked in picks %}
+  {% set pick = next_pick(ranked) %}
+  <li>
+    <a class="repo" href="{{ repo_url(repo) }}" title="{{ repo }}">{{ repo }}</a>
+    <span class="pick">{% if pick %}<span class="rank">{{ pick.task.next_rank }}</span> <a href="{{ task_url(repo, pick.task.task_id) }}">{{ pick.task.title }}</a>{% if ranked|length > 1 %} <span class="held">+{{ ranked|length - 1 }} ranked</span>{% endif %}{% elif ranked %}<span class="held">{{ ranked|length }} ranked, all held — <a href="{{ repo_url(repo) }}">why</a></span>{% else %}<span class="held">nothing ranked</span>{% endif %}</span>
+  </li>
+{% endfor %}
+</ul>
+</section>
+</div>
+
+<h2 id="activity">Activity <span class="count">latest</span> <a class="more" href="/activity">Last 7 days</a></h2>
+{% if events %}
+<ul class="feed" id="activity-list">
+{% for e in events %}
+  <li class="{{ e.kind }}">
+    <span class="when">{{ e.when|ago }}</span>
+    <span class="what"><span class="muted">{{ e.repo }}</span> <span class="kind">{{ e.kind }}</span>{% if e.pull_request %} <span class="muted">#{{ e.pull_request }}</span>{% endif %}
+      {% if e.task_id %}<a href="{{ task_url(e.repo, e.task_id) }}">{{ e.task_title }}</a>{% elif e.task_title %}{{ e.task_title }}{% endif %}
+      <span class="who">{{ e.who }}</span>
+      {% if e.text %}<span class="text">{{ e.text|truncate(120) }}</span>{% endif %}</span>
+  </li>
+{% endfor %}
+</ul>
+{% else %}<p class="empty">Nothing has happened in the last week.</p>{% endif %}
+{% endblock %}
