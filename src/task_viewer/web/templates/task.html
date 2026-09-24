@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}{{ task.task_id }}{% endblock %}
+{% block content %}
+<p class="muted"><a href="{{ repo_url(view.name) }}">{{ view.name }}</a> / <span class="mono">{{ task.task_id }}</span></p>
+<h1>{{ task.title }}</h1>
+<div class="meta">
+  <span>{{ task.state }}</span>
+  {% if task.next_rank %}<span><span class="rank">{{ task.next_rank }}</span> in the queue</span>{% endif %}
+  {% if task.priority %}<span>priority {{ task.priority }}</span>{% endif %}
+  {% if task.labels %}<span class="tags">{% for label in task.labels %}<span class="tag">{{ label }}</span>{% endfor %}</span>{% endif %}
+  {% if task.meta.get("claimed_by") %}<span>claimed by <code>{{ task.meta["claimed_by"] }}</code> {{ task.meta.get("claimed_at", "")|ago }}{% if task.meta.get("branch") %} on <code>{{ task.meta["branch"] }}</code>{% endif %}</span>{% endif %}
+  {% set gh = github_url(view.mirror.url, task, view.mirror.branch) %}{% if gh %}<a href="{{ gh }}">View on GitHub</a>{% endif %}
+</div>
+
+{% if task.state != "closed" %}
+<div class="actions">
+  <form method="post" action="{{ task_url(view.name, task.task_id) }}/queue">
+    <button name="op" value="promote">Do this first</button>
+    <button name="op" value="enqueue" {% if task.next_rank %}disabled{% endif %}>Add to queue</button>
+    <button name="op" value="unqueue" {% if not task.next_rank %}disabled{% endif %}>Remove from queue</button>
+  </form>
+</div>
+{% endif %}
+
+{% if question %}
+<div class="banner"><strong>{% if question.by_agent %}Your answer is needed.{% else %}Waiting on an agent.{% endif %}</strong>
+  <span>Asked by <code>{{ question.author or "?" }}</code> {{ question.when|ago if question.when else question.at }}.</span></div>
+{% endif %}
+
+<div class="body">{{ body_html|safe }}</div>
+
+<h2>History <span class="count">{{ entries|length }} in the conversation</span></h2>
+<div class="thread" id="timeline">
+{% for e in events %}
+{% if e.is_entry %}
+<div class="entry {{ e.kind }}">
+  <div class="head"><span class="kind">{{ e.kind }}</span><span class="who">{{ e.who or "?" }}</span><span class="when">{{ e.when|ago }}</span></div>
+  <div class="text">{{ e.text|markdown|safe }}</div>
+</div>
+{% else %}
+<div class="event"><span class="kind">{{ e.kind }}</span>{% if e.pull_request %} <span class="dim">#{{ e.pull_request }}</span>{% endif %} <span class="who">{{ e.who }}</span> <span class="when">{{ e.when|ago }}</span>{% if e.text %} <span class="dim">— {{ e.text|truncate(100) }}</span>{% endif %}</div>
+{% endif %}
+{% else %}
+<p class="empty">Nothing has happened on this task yet.</p>
+{% endfor %}
+{% for e in entries if e.when is none %}
+<div class="entry {{ e.kind }}">
+  <div class="head"><span class="kind">{{ e.kind }}</span><span class="who">{{ e.author or "?" }}</span><span class="when">{{ e.at or "undated" }}</span></div>
+  <div class="text">{{ e.text|markdown|safe }}</div>
+</div>
+{% endfor %}
+</div>
+
+<form class="reply" method="post" action="{{ task_url(view.name, task.task_id) }}/reply">
+  <div class="row">
+    <span class="seg">
+      {% for k in kinds %}<label><input type="radio" name="kind" value="{{ k }}" {% if (question and k == "answer") or (not question and k == "note") %}checked{% endif %}>{{ k }}</label>{% endfor %}
+    </span>
+    <span class="as">as <code>{{ owner }}</code></span>
+  </div>
+  <textarea name="text" placeholder="Markdown, without headings. Appended to the task and pushed to {{ view.mirror.branch or 'main' }}." required></textarea>
+  <div class="send"><button type="submit" class="primary">Append and push</button><span class="muted">One commit on {{ view.mirror.branch or 'main' }}.</span></div>
+</form>
+{% endblock %}

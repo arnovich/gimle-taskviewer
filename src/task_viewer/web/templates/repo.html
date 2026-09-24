@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}{{ view.name }}{% endblock %}
+{% block content %}
+<h1>{{ view.name }}</h1>
+<p class="lede">{{ view.counts.open }} open, {{ view.counts.ongoing }} ongoing, {{ view.counts.closed }} closed.
+  <a href="/activity?repo={{ view.name|urlencode }}">Activity</a></p>
+{% if view.error %}<p class="bad">{{ view.error }}</p>{% endif %}
+{% if view.refresh and view.refresh.detail %}<p class="warn">{{ view.refresh.detail }}</p>{% endif %}
+
+<h2 id="up-next">Queue <span class="count">as grind reads it</span></h2>
+<div class="queue">
+{% if picks %}
+<ol>
+{% set ns = namespace(next_found=false) %}
+{% for p in picks %}
+  {% set is_next = not p.reason and not ns.next_found %}
+  {% if is_next %}{% set ns.next_found = true %}{% endif %}
+  <li class="{% if is_next %}next{% elif p.reason %}held{% endif %}"><span class="rank">{{ p.task.next_rank }}</span><span class="pick"><a href="{{ task_url(view.name, p.task.task_id) }}">{{ p.task.title }}</a>{% if is_next %} <span class="tag">next</span>{% elif p.reason %} <span class="reason">{{ p.reason }}</span>{% endif %}</span></li>
+{% endfor %}
+</ol>
+{% else %}<p class="empty">Nothing ranked. Rank tasks in <code>tv</code> or on a task page.</p>{% endif %}
+</div>
+
+<h2>Tasks <span class="count">{{ tasks|length }}</span>
+  <span class="more">{% if closed %}<a href="{{ repo_url(view.name) }}">Hide closed</a>{% else %}<a href="{{ repo_url(view.name) }}?closed=1">Show closed</a>{% endif %}</span></h2>
+<table>
+  <thead><tr><th></th><th>#</th><th>Next</th><th>Title</th><th>Priority</th><th>Labels</th></tr></thead>
+  <tbody>
+  {% for t in tasks %}
+  <tr>
+    <td class="state">{{ {"open":"○","ongoing":"◐","closed":"●"}[t.state] }}</td>
+    <td class="id">{{ t.number or "" }}</td>
+    <td class="num">{% if t.next_rank %}<span class="rank">{{ t.next_rank }}</span>{% endif %}</td>
+    <td>{% if t.open_question %}<span class="ask" title="waiting for an answer">?</span> {% endif %}<a href="{{ task_url(view.name, t.task_id) }}">{{ t.title }}</a></td>
+    <td class="dim">{{ t.priority or "" }}</td>
+    <td>{% for label in t.labels %}<span class="tag">{{ label }}</span> {% endfor %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -62,6 +62,10 @@ _ACTIVE_STATES = ("open", "ongoing")
 
 _STATE_MARK = {"open": "○", "ongoing": "◐", "closed": "●"}
 
+# A task whose thread ends in an unanswered question is waiting on someone —
+# usually the owner. It is the one thing about a task that cannot wait.
+_WAITING_MARK = "?"
+
 # Task-level keys are hidden while browsing the project list.
 _TASK_ACTIONS = frozenset(
     {
@@ -964,6 +968,9 @@ class TaskViewerApp(App):
             f"{counts[s]} {s}" for s in STATES if counts[s] or not self._show_closed
         )
         subtitle = f"{len(self._tasks)} tasks ({scope}) · {breakdown}"
+        waiting = sum(1 for task in self._tasks if task.open_question)
+        if waiting:
+            subtitle += f" · {waiting} waiting for an answer"
         if self._workspace:
             subtitle += "  · ← projects"
         if self._grooming:
@@ -1023,9 +1030,13 @@ def _format_row(task: Task, number_width: int) -> str:
     title = escape(task.title)
     body = f"[{style}]{title}[/]" if style else title
     rank = f"[bold cyan]{task.next_rank}[/] " if task.next_rank else ""
+    waiting = f"[bold yellow]{_WAITING_MARK}[/] " if task.open_question else ""
     if not number_width:
-        return f"[dim]{mark}[/] {rank}{body}"
-    return f"[dim]{mark} {(task.number or '').rjust(number_width)}[/] {rank}{body}"
+        return f"[dim]{mark}[/] {rank}{waiting}{body}"
+    return (
+        f"[dim]{mark} {(task.number or '').rjust(number_width)}[/] "
+        f"{rank}{waiting}{body}"
+    )
 
 
 def _format_project_row(
@@ -1206,6 +1217,10 @@ def _meta_line(task: Task) -> str:
         parts.append(f"priority: {task.priority}")
     if task.labels:
         parts.append(" ".join(f"`{label}`" for label in task.labels))
+    question = task.open_question
+    if question is not None:
+        who = f" from `{question.author}`" if question.author else ""
+        parts.append(f"**waiting for an answer**{who}")
     return " · ".join(parts) + "\n\n"
 
 

@@ -66,7 +66,7 @@ def fetch(root: Path, timeout: float = FETCH_TIMEOUT) -> bool:
     branch deleted on the server keeps a stale tracking ref forever and never
     reads as gone.
     """
-    return _run(root, "fetch", "--quiet", "--prune", "--no-auto-gc", timeout=timeout).ok
+    return run_git(root, "fetch", "--quiet", "--prune", "--no-auto-gc", timeout=timeout).ok
 
 
 def fast_forward(root: Path, refresh: bool = True) -> UpdateResult:
@@ -117,7 +117,7 @@ def fast_forward(root: Path, refresh: bool = True) -> UpdateResult:
             "move them aside first",
         )
 
-    result = _run(root, "merge", "--ff-only", info.upstream, timeout=FETCH_TIMEOUT)
+    result = run_git(root, "merge", "--ff-only", info.upstream, timeout=FETCH_TIMEOUT)
     if not result.ok:
         return UpdateResult(False, _first_line(result.error) or "git refused the merge")
     commits = "commit" if info.unpulled == 1 else "commits"
@@ -131,7 +131,7 @@ def _ignored_clashes(root: Path, upstream: str) -> list[str]:
     *ignored* one. A local ``.env`` is exactly the sort of thing that is
     ignored, exists nowhere else, and would be destroyed without a word.
     """
-    incoming = _run(root, "diff", "--name-only", "-z", f"HEAD..{upstream}", timeout=FETCH_TIMEOUT)
+    incoming = run_git(root, "diff", "--name-only", "-z", f"HEAD..{upstream}", timeout=FETCH_TIMEOUT)
     if not incoming.ok:
         return []
     candidates = [name for name in incoming.out.split("\0") if name and (root / name).exists()]
@@ -139,7 +139,7 @@ def _ignored_clashes(root: Path, upstream: str) -> list[str]:
         return []
     # check-ignore reads paths on stdin, so any number of them is fine, and it
     # exits non-zero simply to mean "none of these are ignored".
-    ignored = _run(
+    ignored = run_git(
         root,
         "check-ignore",
         "--stdin",
@@ -169,11 +169,25 @@ def _first_line(text: str) -> str:
     return ""
 
 
-def _env() -> dict[str, str]:
+# Variables that redirect git to another repository entirely. ``-C`` does not
+# override them, so one left in the owner's shell would silently point every
+# mirror command somewhere else.
+_REDIRECTING = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_NAMESPACE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+)
+
+
+def _env(root: Path) -> dict[str, str]:
     """An environment in which git cannot ask a human anything."""
-    ssh = _config("core.sshCommand") or "ssh"
+    ssh = _config(root, "core.sshCommand") or "ssh"
     return {
-        **os.environ,
+        **{k: v for k, v in os.environ.items() if k not in _REDIRECTING},
         "GIT_TERMINAL_PROMPT": "0",
         # GIT_TERMINAL_PROMPT alone does not stop an askpass helper, which on a
         # desktop pops a modal dialog per repository.
@@ -188,10 +202,10 @@ def _env() -> dict[str, str]:
     }
 
 
-def _config(key: str) -> str:
+def _config(root: Path, key: str) -> str:
     try:
         proc = subprocess.run(
-            ["git", "config", "--get", key],
+            ["git", "-C", str(root), "config", "--get", key],
             capture_output=True,
             text=True,
             timeout=5,
@@ -202,10 +216,14 @@ def _config(key: str) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
-def _run(
+def run_git(
     root: Path, *args: str, timeout: float, stdin_text: str | None = None
 ) -> CommandResult:
-    """Run a git command that may touch the network or run hooks."""
+    """Run a git command that may touch the network or run hooks.
+
+    Never prompts, always times out, and is killed if the app quits — which
+    is why the control plane's mirrors route their git through here too.
+    """
     command = ["git", "-C", str(root), *args]
     try:
         child = subprocess.Popen(
@@ -215,7 +233,7 @@ def _run(
             stderr=subprocess.PIPE,
             text=True,
             errors="surrogateescape",
-            env=_env(),
+            env=_env(root),
         )
     except (OSError, ValueError) as error:
         return CommandResult(False, "", str(error))
