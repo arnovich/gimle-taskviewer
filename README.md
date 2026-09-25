@@ -277,7 +277,7 @@ the dialog tells you what is wrong and the decision stays yours. `a` adds
 | `u`        | Fast-forward the highlighted project (workspace mode) |
 | `M`        | Merge the highlighted worktree's pull request       |
 | `m`        | Comment on it (opens `$EDITOR`)                     |
-| `a`        | Reply in the task's thread (opens `$EDITOR`); pushed to `main` |
+| `a`        | Reply in the task's thread (opens `$EDITOR`); pushed to `main`   |
 | `w`        | Open the pull request in a browser                  |
 | `Tab`      | Switch focus between the two panes                 |
 | `c`        | **Work on the task with Claude Code** (see below)  |
@@ -358,10 +358,11 @@ entry is written under your handle (`TV_OWNER`, else git's `user.name`
 squeezed to one token) and **committed and pushed to `main` on its own**: one
 task file, from a throwaway worktree of `origin/main`, retried from the fresh
 tip if an agent pushed first. Your checkout is never written — a task file
-edited locally would block your next pull — so if it is a clean checkout of
-`main` it is fast-forwarded and the `?` clears; on a branch or with local
-edits the entry is on `main` and the list shows the file as it was until you
-pull. An empty message aborts; a failed push keeps your draft and says where.
+edited locally would block your next pull. The list shows the thread as
+`main` now has it, so the `?` clears either way; a clean checkout of `main`
+is also fast-forwarded, while a branch or a tree with local edits is left
+alone and the file on disk stays behind until you pull. An empty message
+aborts; a failed push keeps your draft and says where.
 
 ## The control plane: `tv-web`
 

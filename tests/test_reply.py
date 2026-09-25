@@ -11,10 +11,12 @@ import pytest
 from helpers import clone_repo, git, init_repo
 
 from task_viewer import reply
-from task_viewer.app import TaskListView, TaskViewerApp, _split_kind
+from task_viewer.app import TaskListView, TaskViewerApp, _body_of, _split_kind
 from task_viewer.conversation import new_entry, open_question, parse
 from task_viewer.discovery import load_tasks
-from task_viewer.reply import default_branch, find_task_file, owner_handle, push_entry
+from task_viewer.owner import resolve_owner
+from task_viewer.remote import CommandResult
+from task_viewer.reply import default_branch, find_task_file, push_entry
 
 TASK = (
     "---\n"
@@ -143,10 +145,14 @@ def test_default_branch_comes_from_origin_head_with_a_fallback(repos) -> None:
     assert default_branch(work) == "main"
 
 
-def test_owner_handle_is_one_token_without_a_slash() -> None:
-    assert owner_handle("erikarne") == "erikarne"
-    assert owner_handle("Erik Arne!") == "ErikArne"
-    assert owner_handle("a/b") == "ab"
+def test_the_owner_handle_is_one_token_without_a_slash(repos) -> None:
+    """The same rule as the control plane: unsafe runs become ``-``, and a ``/`` never survives."""
+    seed, origin, work = repos
+    assert resolve_owner("erikarne") == "erikarne"
+    assert resolve_owner("Erik Arne!") == "Erik-Arne"
+    assert resolve_owner("team/erik") == "team-erik"
+    git(work, "config", "user.name", "Per Repo")
+    assert resolve_owner("", work) == "Per-Repo"
 
 
 def test_split_kind_reads_the_first_line_when_it_names_a_kind() -> None:
@@ -154,6 +160,15 @@ def test_split_kind_reads_the_first_line_when_it_names_a_kind() -> None:
     assert _split_kind("Note\nJust saying.", "answer") == ("note", "Just saying.")
     assert _split_kind("The 5070 Ti.", "answer") == ("answer", "The 5070 Ti.")
     assert _split_kind("answer\n\n", "answer") == ("answer", "")
+    # The cursor starts on the kind line, so text typed there belongs to the entry.
+    assert _split_kind("answer The 5070 Ti.", "note") == ("answer", "The 5070 Ti.")
+    assert _split_kind("answer: The 5070 Ti.\nMore.", "note") == ("answer", "The 5070 Ti.\nMore.")
+    assert _split_kind("answers are hard", "note") == ("note", "answers are hard")
+
+
+def test_body_of_drops_the_frontmatter() -> None:
+    assert _body_of("---\ntitle: x\n---\n\n## Context\n") == "\n## Context\n"
+    assert _body_of("## Context\n") == "## Context\n"
 
 
 def _scripted_editor(tmp_path: Path, text: str) -> str:
@@ -202,3 +217,132 @@ async def test_an_empty_reply_aborts_without_touching_anything(repos, tmp_path, 
     assert _out(origin, "rev-parse", "main") == before
     # The abandoned draft is removed, not kept: there was nothing in it.
     assert set(Path(tempfile.gettempdir()).glob("tv-reply-052-*")) == drafts_before
+
+
+def test_an_ambiguous_number_is_refused_unless_the_stem_picks_one(repos) -> None:
+    seed, origin, work = repos
+    twin = seed / "tasks" / "open" / "052-second-task.md"
+    twin.write_text(TASK.replace("Batched GPU simulation", "Second"), encoding="utf-8")
+    git(seed, "add", "tasks")
+    git(seed, "commit", "-m", "a second 052")
+    git(seed, "push", "--quiet", "origin", "HEAD:main")
+    before = _out(origin, "rev-parse", "main")
+
+    refused = push_entry(work, "052", new_entry("note", "erikarne", "hi"))
+    assert not refused.ok and "ambiguous" in refused.message
+    assert _out(origin, "rev-parse", "main") == before
+
+    picked = push_entry(work, "052", new_entry("note", "erikarne", "hi"), stem="052-second-task")
+    assert picked.ok, picked.message
+    assert "### note" in _out(origin, "show", "main:tasks/open/052-second-task.md")
+    assert "### note" not in _out(origin, "show", "main:tasks/open/052-batched-gpu.md")
+
+
+def test_a_remote_rejection_is_not_retried(repos, monkeypatch) -> None:
+    seed, origin, work = repos
+    real = reply.run_git
+    pushes = {"count": 0}
+
+    def hook_declines(root, *args, **kwargs):
+        if args[:1] == ("push",):
+            pushes["count"] += 1
+            return CommandResult(
+                False, "", "! [remote rejected] HEAD -> main (pre-receive hook declined)"
+            )
+        return real(root, *args, **kwargs)
+
+    monkeypatch.setattr(reply, "run_git", hook_declines)
+    result = push_entry(work, "052", new_entry("note", "erikarne", "hi"))
+    assert not result.ok and "pre-receive hook declined" in result.message
+    assert pushes["count"] == 1
+    assert len(_out(work, "worktree", "list").splitlines()) == 1
+
+
+def test_a_fetch_that_lost_a_ref_lock_is_retried(repos, monkeypatch) -> None:
+    seed, origin, work = repos
+    real = reply.run_git
+    fetches = {"count": 0}
+
+    def locked_once(root, *args, **kwargs):
+        if args[:1] == ("fetch",):
+            fetches["count"] += 1
+            if fetches["count"] == 1:
+                return CommandResult(
+                    False, "", "error: cannot lock ref 'refs/remotes/origin/main': is at x but expected y"
+                )
+        return real(root, *args, **kwargs)
+
+    monkeypatch.setattr(reply, "run_git", locked_once)
+    monkeypatch.setattr(reply.time, "sleep", lambda _seconds: None)
+    result = push_entry(work, "052", new_entry("note", "erikarne", "hi"))
+    assert result.ok, result.message
+    assert fetches["count"] == 2
+
+
+def test_a_hook_that_stages_more_keeps_the_commit_off_main(repos) -> None:
+    seed, origin, work = repos
+    hooks = work / _out(work, "rev-parse", "--git-path", "hooks").strip()
+    hooks.mkdir(parents=True, exist_ok=True)
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\necho extra > extra.txt\ngit add extra.txt\n", encoding="utf-8")
+    hook.chmod(hook.stat().st_mode | stat.S_IEXEC)
+    before = _out(origin, "rev-parse", "main")
+
+    result = push_entry(work, "052", new_entry("note", "erikarne", "hi"))
+
+    assert not result.ok and "a hook staged more" in result.message
+    assert _out(origin, "rev-parse", "main") == before
+    assert len(_out(work, "worktree", "list").splitlines()) == 1
+
+
+@pytest.mark.asyncio
+async def test_on_a_task_branch_the_list_shows_the_pushed_thread(repos, tmp_path, monkeypatch) -> None:
+    """The checkout is not touched, yet the ? clears: the pushed thread is overlaid."""
+    seed, origin, work = repos
+    git(work, "checkout", "--quiet", "-b", "task/052_batched_gpu")
+    monkeypatch.setenv("EDITOR", _scripted_editor(tmp_path, "answer The 5070 Ti.\n"))
+    monkeypatch.setenv("TV_OWNER", "erikarne")
+    app = TaskViewerApp.single(work / "tasks", "work")
+    async with app.run_test() as pilot:
+        app.query_one(TaskListView).index = 0
+        await pilot.pause()
+        await pilot.press("a")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert "### answer · erikarne · " in _out(origin, "show", "main:tasks/open/052-batched-gpu.md")
+        assert app._tasks[0].open_question is None
+        assert "The 5070 Ti." in app._tasks[0].description
+        # Still on the branch, nothing written here.
+        assert _out(work, "rev-parse", "--abbrev-ref", "HEAD").strip() == "task/052_batched_gpu"
+        assert _out(work, "status", "--porcelain") == ""
+        assert "answer" not in (work / "tasks" / "open" / "052-batched-gpu.md").read_text(encoding="utf-8")
+
+        await pilot.press("r")  # reload from disk: the overlay survives
+        await pilot.pause()
+        assert app._tasks[0].open_question is None
+
+
+@pytest.mark.asyncio
+async def test_a_failure_inside_the_push_reports_and_frees_the_key(repos, tmp_path, monkeypatch) -> None:
+    seed, origin, work = repos
+    monkeypatch.setenv("EDITOR", _scripted_editor(tmp_path, "answer The 5070 Ti.\n"))
+    monkeypatch.setenv("TV_OWNER", "erikarne")
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(reply, "append", boom)
+    app = TaskViewerApp.single(work / "tasks", "work")
+    async with app.run_test() as pilot:
+        app.query_one(TaskListView).index = 0
+        await pilot.pause()
+        await pilot.press("a")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app._replying is False
+        assert app._tasks[0].open_question is not None
+        drafts = list(Path(tempfile.gettempdir()).glob("tv-reply-052-*.md"))
+        assert drafts, "the draft is kept when the push fails"
+        for draft in drafts:
+            draft.unlink()

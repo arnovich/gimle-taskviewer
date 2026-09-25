@@ -29,16 +29,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .remote import FETCH_TIMEOUT, CommandResult, fetch, run_git
+from .remote import FETCH_TIMEOUT, PUSH_RACE_RE, CommandResult, fetch, run_git
 
 # Long enough that a page load never waits on the network twice in a row,
 # short enough that an answer pushed from an editor shows up on the next look.
 DEFAULT_MAX_AGE = 60.0
 
-# git's own words for "someone pushed first" — the one push failure worth
-# retrying. A hook or a protected branch also says "rejected", but as
-# "[remote rejected]" and with its own reason, and retrying that is useless.
-_RACE_RE = re.compile(r"\[rejected\][^\n]*\((?:fetch first|non-fast-forward|stale info)\)")
+_RACE_RE = PUSH_RACE_RE  # shared with the TUI's reply; the words are git's, not ours
 
 _URL_TAIL_RE = re.compile(r"([^/:]+?)(?:\.git)?/?$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")

@@ -13,6 +13,7 @@ instead.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -28,6 +29,15 @@ FETCH_TIMEOUT = 30.0
 # without this `q` can leave the user staring at a dead terminal.
 _running: set[subprocess.Popen] = set()
 _running_lock = threading.Lock()
+
+
+# git's own words for "someone pushed first" — the one push failure worth
+# retrying. A hook or a protected branch also says "rejected", but as
+# "[remote rejected]" and with its own reason, and retrying that is useless.
+PUSH_RACE_RE = re.compile(r"\[rejected\][^\n]*\((?:fetch first|non-fast-forward|stale info)\)")
+# A fetch that lost a ref lock to another fetch of the same repository — tv's
+# own refresh runs one per repo in a pool — is worth a short wait and a retry.
+FETCH_LOCK_RE = re.compile(r"cannot lock ref|could not lock|unable to create '[^']*\.lock'", re.IGNORECASE)
 
 
 @dataclass

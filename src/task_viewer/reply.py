@@ -9,21 +9,27 @@ is never written: a task file edited locally blocks the next pull.
 
 from __future__ import annotations
 
-import re
 import shutil
-import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from .conversation import Entry, append
 from .git_info import load_git_info
-from .remote import FETCH_TIMEOUT, CommandResult, fast_forward, run_git
+from .remote import (
+    FETCH_LOCK_RE,
+    FETCH_TIMEOUT,
+    PUSH_RACE_RE,
+    CommandResult,
+    fast_forward,
+    run_git,
+)
+from .textfile import TextFileError
 
 ATTEMPTS = 3
+LOCK_RETRIES = 5
 STATES = ("open", "ongoing", "closed")
-_HANDLE_RE = re.compile(r"[^A-Za-z0-9._/@-]+")
-_RACE_RE = re.compile(r"non-fast-forward|fetch first|stale info|rejected", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -33,29 +39,14 @@ class PushResult:
     ok: bool
     message: str
     branch: str = ""
+    # On success: the task file's path on that branch and its content after
+    # the entry, so the list can show the thread as main now has it.
+    path: str = ""
+    content: str = ""
 
 
-def owner_handle(configured: str = "") -> str:
-    """The handle written on the owner's entries: one token, no ``/``.
-
-    Configured wins; otherwise git's ``user.name`` squeezed to one token,
-    as the control plane does; otherwise ``owner``. An agent's handle has a
-    ``/`` in it, so one is never written here.
-    """
-    if configured.strip():
-        return _handle(configured) or "owner"
-    try:
-        proc = subprocess.run(
-            ["git", "config", "--get", "user.name"],
-            capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "owner"
-    return (_handle(proc.stdout) if proc.returncode == 0 else "") or "owner"
-
-
-def _handle(text: str) -> str:
-    return _HANDLE_RE.sub("", text).replace("/", "").strip("._-")
+class AmbiguousTask(LookupError):
+    """More than one task carries the number; automation must not guess."""
 
 
 def default_branch(root: Path) -> str:
@@ -77,42 +68,56 @@ def default_branch(root: Path) -> str:
     return "main"
 
 
-def find_task_file(tree: Path, task_id: str) -> Path | None:
+def find_task_file(tree: Path, number: str, stem: str | None = None) -> Path | None:
     """The task's own file under ``tree/tasks``, whichever state folder holds it.
 
     A single-file task is ``NNN-*.md``; a directory task keeps its thread in
     ``NNN-*/description.md``. The local copy may be stale — an agent moves the
     file to ``ongoing/`` when it claims and to ``closed/`` when its PR opens —
-    so the search is by number, not by the path the checkout knows.
+    so the search is by number, not by the path the checkout knows. Two tasks
+    with the same number are refused unless ``stem`` (the local file's name)
+    picks one out: the standard says an ambiguous number is never acted on.
     """
+    found: list[Path] = []
     for state in STATES:
         folder = tree / "tasks" / state
         if not folder.is_dir():
             continue
-        for candidate in sorted(folder.glob(f"{task_id}-*")):
+        for candidate in sorted(folder.glob(f"{number}-*")):
             if candidate.is_file() and candidate.suffix == ".md":
-                return candidate
-            if candidate.is_dir() and (candidate / "description.md").is_file():
-                return candidate / "description.md"
-    return None
+                found.append(candidate)
+            elif candidate.is_dir() and (candidate / "description.md").is_file():
+                found.append(candidate / "description.md")
+    if len(found) > 1 and stem:
+        exact = [path for path in found if path.stem == stem or path.parent.name == stem]
+        if len(exact) == 1:
+            return exact[0]
+    if len(found) > 1:
+        names = ", ".join(str(path.relative_to(tree)) for path in found)
+        raise AmbiguousTask(f"task {number} is ambiguous on that branch: {names}")
+    return found[0] if found else None
 
 
 def push_entry(
-    root: Path, task_id: str, entry: Entry, *, attempts: int = ATTEMPTS
+    root: Path, number: str, entry: Entry, *, stem: str | None = None, attempts: int = ATTEMPTS
 ) -> PushResult:
     """Append ``entry`` to the task's thread on origin's default branch.
 
     Works in a throwaway detached worktree of ``origin/<default>``, so the
     checkout at ``root`` can be dirty or on any branch. A push that loses the
-    race is retried from the remote's new tip with the entry appended again.
+    race is retried from the remote's new tip with the entry appended again;
+    a fetch that loses a ref lock to tv's own refresh waits and retries.
     """
     branch = default_branch(root)
     error = ""
     for _ in range(attempts):
-        fetched = run_git(root, "fetch", "--quiet", "origin", branch, timeout=FETCH_TIMEOUT)
+        fetched = _fetch(root, branch)
         if not fetched.ok:
             return PushResult(False, f"could not fetch origin/{branch}: {_reason(fetched)}")
-        parent = Path(tempfile.mkdtemp(prefix=f"tv-reply-{task_id}-"))
+        try:
+            parent = Path(tempfile.mkdtemp(prefix=f"tv-reply-{number}-"))
+        except OSError as failure:
+            return PushResult(False, f"could not make a temporary worktree: {failure}")
         work = parent / "tree"
         try:
             added = run_git(
@@ -121,12 +126,19 @@ def push_entry(
             )
             if not added.ok:
                 return PushResult(False, f"could not check out origin/{branch}: {_reason(added)}")
-            target = find_task_file(work, task_id)
+            try:
+                target = find_task_file(work, number, stem)
+            except AmbiguousTask as failure:
+                return PushResult(False, f"{failure} — nothing pushed")
             if target is None:
-                return PushResult(False, f"task {task_id} is not on origin/{branch} — nothing pushed")
-            append(target, entry)
+                return PushResult(False, f"task {number} is not on origin/{branch} — nothing pushed")
+            try:
+                append(target, entry)
+                content = target.read_text(encoding="utf-8")
+            except (TextFileError, OSError, UnicodeDecodeError) as failure:
+                return PushResult(False, f"could not write the entry: {failure}")
             rel = target.relative_to(work).as_posix()
-            committed = _commit(work, rel, f"task {task_id}: {entry.kind}")
+            committed = _commit(work, rel, f"task {number}: {entry.kind}")
             if not committed.ok:
                 return PushResult(False, f"commit failed: {_reason(committed)}")
             pushed = run_git(
@@ -134,9 +146,9 @@ def push_entry(
                 timeout=FETCH_TIMEOUT,
             )
             if pushed.ok:
-                return PushResult(True, f"{entry.kind} pushed to origin/{branch}", branch)
+                return PushResult(True, f"{entry.kind} pushed to origin/{branch}", branch, rel, content)
             error = _reason(pushed)
-            if not _RACE_RE.search(pushed.error):
+            if not PUSH_RACE_RE.search(pushed.error):
                 return PushResult(False, f"push failed: {error}")
         finally:
             run_git(root, "worktree", "remove", "--force", str(work), timeout=FETCH_TIMEOUT)
@@ -145,35 +157,58 @@ def push_entry(
     return PushResult(False, f"push rejected {attempts} times in a row: {error}")
 
 
+def _fetch(root: Path, branch: str) -> CommandResult:
+    """Fetch the branch, waiting out a ref lock held by another fetch of this repo."""
+    fetched = CommandResult(False, "", "not fetched")
+    for attempt in range(1, LOCK_RETRIES + 1):
+        fetched = run_git(root, "fetch", "--quiet", "origin", branch, timeout=FETCH_TIMEOUT)
+        if fetched.ok or not FETCH_LOCK_RE.search(fetched.error) or attempt == LOCK_RETRIES:
+            return fetched
+        time.sleep(0.2 * attempt)
+    return fetched
+
+
 def _commit(work: Path, rel: str, message: str) -> CommandResult:
-    """Stage and commit one path; a hook that rewrites the file gets one more try."""
+    """Stage and commit one path; a hook that rewrites the file gets one more try.
+
+    The commit is then checked to carry that path and nothing else: a hook
+    that stages other files must not ride to ``main`` on a reply.
+    """
+    committed = CommandResult(False, "", "nothing committed")
     for _ in range(2):
         staged = run_git(work, "add", "--", rel, timeout=FETCH_TIMEOUT)
         if not staged.ok:
             return staged
         committed = run_git(work, "commit", "--quiet", "-m", message, "--", rel, timeout=FETCH_TIMEOUT)
         if committed.ok:
-            return committed
+            break
+    if not committed.ok:
+        return committed
+    carried = run_git(work, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD", timeout=FETCH_TIMEOUT)
+    files = carried.out.split()
+    if files != [rel]:
+        return CommandResult(False, "", f"the commit carries {files}, not only {rel} (a hook staged more)")
     return committed
 
 
 def refresh_checkout(root: Path, branch: str) -> str:
     """Fast-forward ``root`` onto what was just pushed, when that is safe.
 
-    Only a clean checkout of the default branch itself is moved, through the
-    same guarded path as the ``u`` key; anything else — a feature branch, a
-    worktree, local edits — is left alone and named, so the owner knows the
-    list still shows the file as it was.
+    Only a clean checkout of the default branch that tracks ``origin/<branch>``
+    is moved, through the same guarded path as the ``u`` key; anything else —
+    a task branch, a fork's ``main``, local edits — is left alone and named,
+    so the owner knows the file on disk is behind what the list shows.
     """
     info = load_git_info(root)
     if info is None:
         return ""
-    if info.branch != branch:
-        return f"checkout is on {info.branch}; pull to see it here"
+    if info.branch != branch or info.upstream != f"origin/{branch}":
+        return f"checkout is on {info.branch}; the file here is behind origin/{branch}"
     result = fast_forward(root, refresh=False)
     return "" if result.ok else f"checkout not updated: {result.message}"
 
 
 def _reason(result: CommandResult) -> str:
+    """The first line git gave, for a notification that says why."""
     text = (result.error or result.out).strip()
     return text.splitlines()[0] if text else "git gave no reason"
