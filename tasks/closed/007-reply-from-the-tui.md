@@ -1,9 +1,6 @@
 ---
 title: Reply to a task's conversation from tv
-state: ongoing
-claimed_by: claude/6e99c99d-242f-4123-8681-978dfc1a3b08
-claimed_at: 2026-09-25T07:48:16Z
-branch: task/007_reply_from_the_tui
+state: closed
 priority: medium
 labels: [tui, enhancement]
 ---
@@ -44,14 +41,20 @@ the same key.
   `origin/<default>` is created next to the repo, the task's file is found
   there by number (it may have moved to `ongoing/` or `closed/` since the
   local copy was read), `conversation.append` adds the entry, that one path
-  is staged, committed as `task NNN: <kind>` and pushed `HEAD:refs/heads/<default>`;
-  a rejected push is retried from the fresh tip, up to three times. The
-  worktree is removed whatever happens. The working tree is never written:
+  is staged, committed as `task NNN: <kind>`, checked to carry that path alone,
+  and pushed `HEAD:refs/heads/<default>`; a push that lost the race is retried
+  from the fresh tip, up to three times, while a hook or permission refusal is
+  not, and a fetch that lost a ref lock to tv's own refresh waits and retries.
+  The worktree lives in a temporary directory, not beside the repo, and is
+  removed whatever happens. The working tree is never written:
   a task file edited locally would block the owner's next pull (seen on
   Heimdall). Afterwards, if the checkout is on the default branch and clean,
   it is fast-forwarded with the existing `remote.fast_forward` so the list
   re-renders without the `?`; otherwise the owner is told the entry is on
-  `main` and the checkout was left alone.
+  `main` and the checkout was left alone. Either way the list shows the thread
+  as `main` has it: the pushed body is overlaid on the in-memory task until the
+  file on disk carries the same last entry, so the `?` clears in every checkout
+  state.
 - **Files** — new `src/task_viewer/reply.py` (`push_entry`, `find_task_file`,
   `owner_handle`); `app.py` gains the `a` binding, `action_reply_task`, a
   generalised editor helper shared with the PR comment, and a worker that
