@@ -11,6 +11,7 @@ Two navigation levels:
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -28,6 +29,7 @@ from textual.containers import VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Label, ListItem, ListView, Markdown
 
+from .conversation import KINDS, ConversationError, Entry, new_entry, parse
 from .discovery import STATES, Task, count_states, load_tasks
 from .git_info import (
     GitInfo,
@@ -48,6 +50,8 @@ from .pull_requests import (
 )
 from .queue_ops import QueueError, clear_next, enqueue, promote
 from .remote import UpdateResult, cancel_all, fast_forward, fetch
+from .owner import resolve_owner
+from .reply import PushResult, push_entry, refresh_checkout
 from .state_ops import StateChangeError, set_state
 from .workspace import Project, ProjectGroup, group_projects
 
@@ -69,6 +73,7 @@ _WAITING_MARK = "?"
 # Task-level keys are hidden while browsing the project list.
 _TASK_ACTIONS = frozenset(
     {
+        "reply_task",
         "work_on_task",
         "groom",
         "queue_task",
@@ -216,6 +221,7 @@ class TaskViewerApp(App):
         Binding("f", "fetch", "Fetch", show=True),
         Binding("M", "merge_pr", "Merge PR", show=True),
         Binding("m", "comment_pr", "Comment", show=True),
+        Binding("a", "reply_task", "Reply", show=True),
         Binding("w", "open_pr", "Open in browser", show=True),
         Binding("u", "update", "Update", show=True),
         Binding("c", "work_on_task", "Work (Claude)", show=True),
@@ -268,6 +274,10 @@ class TaskViewerApp(App):
         self._pulls: dict[Path, PullRequest] = {}
         self._pr_errors: set[Path] = set()
         self._merging = False
+        self._replying = False
+        # Threads pushed to main this session, keyed by task id: shown in place of
+        # the disk copy until the checkout catches up (see _overlay_pushed_threads).
+        self._pushed_threads: dict[str, tuple[str, str]] = {}
 
     @classmethod
     def single(
@@ -506,9 +516,13 @@ class TaskViewerApp(App):
             "Everything from the marker down is ignored. An empty message aborts.\n"
             "-->\n"
         )
+        return self._compose_text(template, "tv-comment-")
+
+    def _compose_text(self, template: str, prefix: str) -> tuple[str, Path] | None:
+        """Suspend the TUI, let $EDITOR fill ``template``, return the text and its file."""
         editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
         handle = tempfile.NamedTemporaryFile(
-            "w", suffix=".md", prefix="tv-comment-", delete=False, encoding="utf-8"
+            "w", suffix=".md", prefix=prefix, delete=False, encoding="utf-8"
         )
         with handle:
             handle.write(template)
@@ -532,6 +546,80 @@ class TaskViewerApp(App):
             path.unlink(missing_ok=True)
             return None
         return body, path
+
+    def action_reply_task(self) -> None:
+        """Answer the task's thread in $EDITOR; the entry is pushed to main."""
+        task = self._current_task()
+        if task is None or self._tasks_dir is None:
+            return
+        if self._replying:
+            self.notify("a reply is still being pushed; try again in a moment", timeout=4)
+            return
+        number = task.number
+        if number is None:
+            self.notify(f"{task.task_id} has no task number to reply on", severity="error", timeout=6)
+            return
+        default = "answer" if task.open_question else "note"
+        root = self._tasks_dir.parent
+        owner = resolve_owner(os.environ.get("TV_OWNER", ""), root)
+        try:
+            draft = self._compose_text(
+                _reply_template(task, default, owner), f"tv-reply-{number}-"
+            )
+        except Exception as error:  # noqa: BLE001 - never take the TUI down
+            self.notify(f"could not open an editor: {error}", severity="error", timeout=8)
+            return
+        kind, text = _split_kind(draft[0], default) if draft else (default, "")
+        if draft is None or not text:
+            if draft:
+                draft[1].unlink(missing_ok=True)
+            self.notify(
+                "nothing written — if your $EDITOR detaches (code, subl), "
+                "give it a blocking form such as `code --wait`",
+                timeout=8,
+            )
+            return
+        draft_path = draft[1]
+        try:
+            entry = new_entry(kind, owner, text)
+        except ConversationError as error:
+            self.notify(f"{error} — draft kept at {draft_path}", severity="error", timeout=10)
+            return
+        self._replying = True
+        self.notify(f"{number}: pushing {kind} to main…", timeout=3)
+        self._run_reply(root, task, number, entry, draft_path)
+
+    @work(thread=True, group="reply", exclusive=True, exit_on_error=False)
+    def _run_reply(
+        self, root: Path, task: Task, number: str, entry: Entry, draft_path: Path
+    ) -> None:
+        note = ""
+        try:
+            result = push_entry(root, number, entry, stem=task.path.stem)
+            if result.ok:
+                draft_path.unlink(missing_ok=True)
+                note = refresh_checkout(root, result.branch)
+        except Exception as failure:  # noqa: BLE001 - the key must come back either way
+            result = PushResult(False, f"reply failed: {failure}")
+        if not result.ok:
+            # Never destroy what the user wrote; tell them where it is.
+            result = PushResult(False, f"{result.message} — draft kept at {draft_path}")
+        self.call_from_thread(self._on_reply_done, task, result, note)
+
+    def _on_reply_done(self, task: Task, result: PushResult, note: str) -> None:
+        self._replying = False
+        message = f"{task.number or task.task_id}: {result.message}" + (f" ({note})" if note else "")
+        self.notify(
+            message, severity="information" if result.ok else "warning", timeout=10
+        )
+        if result.ok:
+            body = _body_of(result.content)
+            entries = parse(body)
+            if entries:
+                self._pushed_threads[task.task_id] = (entries[-1].at, body)
+        if self.is_running:
+            self._refresh_tasks(keep_selection=True)
+            self._load_git_info()
 
     def _current_path(self) -> Path | None:
         row = self._current_row()
@@ -907,6 +995,25 @@ class TaskViewerApp(App):
         self._refresh_tasks(keep_selection=True)
         return new_path
 
+    def _overlay_pushed_threads(self) -> None:
+        """Show a thread as ``main`` has it until the checkout catches up.
+
+        A reply goes to ``main``, never to this checkout; on a task branch or a
+        dirty tree the disk copy stays behind. The pushed body stands in for it
+        until the file on disk carries the same last entry.
+        """
+        for task in self._tasks:
+            pushed = self._pushed_threads.get(task.task_id)
+            if pushed is None:
+                continue
+            stamp, body = pushed
+            if any(entry.at == stamp for entry in task.conversation):
+                del self._pushed_threads[task.task_id]
+                continue
+            if task.body == task.description:
+                task.body = body
+            task.description = body
+
     def _launch_claude(self, task: Task, path: Path) -> None:
         """Suspend the TUI and run Claude Code on the task in the project root."""
         assert self._tasks_dir is not None
@@ -941,6 +1048,7 @@ class TaskViewerApp(App):
                 previous_id = self._tasks[index].task_id
 
         self._tasks = load_tasks(self._tasks_dir, states)
+        self._overlay_pushed_threads()
         number_width = _number_width(self._tasks)
         list_view = self.query_one(TaskListView)
         list_view.clear()
@@ -1184,6 +1292,51 @@ def _remote_markers(info: GitInfo) -> list[str]:
     if info.unpulled and info.tracks_own_branch:
         markers.append(f"[bold cyan]↓{info.unpulled}[/]")
     return markers
+
+
+def _reply_template(task: Task, default: str, owner: str) -> str:
+    """The editor buffer for a reply: the kind on the first line, then the text."""
+    asked = task.open_question
+    context = ""
+    if asked is not None:
+        preview = " ".join(asked.text.split())[:240]
+        context = f"{asked.author} asked: {preview}\n"
+    return (
+        f"{default}\n\n\n{_COMMENT_FENCE}\n"
+        f"Reply on {task.number or task.task_id}: {task.title}\n"
+        f"{context}"
+        f"First line is the kind ({' | '.join(KINDS)}); the text follows.\n"
+        f"It is committed and pushed to main as {owner}; nothing is written to this checkout.\n"
+        "Everything from the marker down is ignored. An empty message aborts.\n"
+        "-->\n"
+    )
+
+
+_KIND_LINE_RE = re.compile(rf"^\s*({'|'.join(KINDS)})\b[ \t:.\-]*(.*)$", re.IGNORECASE)
+
+
+def _split_kind(body: str, default: str) -> tuple[str, str]:
+    """``(kind, text)`` from an editor buffer.
+
+    The first line names the kind, alone or followed by text on the same line
+    (the cursor starts there, so ``answer The 5070 Ti.`` is common); any other
+    first line is text under the default kind.
+    """
+    lines = body.strip().splitlines()
+    match = _KIND_LINE_RE.match(lines[0]) if lines else None
+    if match is None:
+        return default, body.strip()
+    rest = [match.group(2), *lines[1:]]
+    return match.group(1).lower(), "\n".join(rest).strip()
+
+
+def _body_of(content: str) -> str:
+    """The body of a task file: what follows the frontmatter, or all of it."""
+    if content.startswith("---"):
+        parts = content.split("\n---", 1)
+        if len(parts) == 2:
+            return parts[1].split("\n", 1)[1] if "\n" in parts[1] else ""
+    return content
 
 
 def _run_editor(editor: str, path: Path) -> subprocess.CompletedProcess | None:
