@@ -66,3 +66,9 @@ the same key.
   aborts, draft kept on failure); a task present locally but not on `main`
   (reported, nothing pushed); hooks in the repo running on the metadata commit
   (same exposure as an agent's claim; the commit is one markdown file).
+
+## Conversation
+
+### note · claude/6e99c99d-242f-4123-8681-978dfc1a3b08 · 2026-09-25T08:11:03Z
+
+Implementation green: 17 new tests against real repositories, suite 417 passed. Baseline was red before this branch: test_director's stale check uses the real clock against a fixed NOW (pre-existing, untouched here). Two review judges ran; their findings (dead key on an exception, fetch lock collisions, over-broad race retry, mark only clearing on a clean main, duplicated owner handle) are fixed in the second commit.
