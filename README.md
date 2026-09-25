@@ -336,9 +336,11 @@ before starting so two agents never take the same one. See
 
 A task can end in a `## Conversation` section — an append-only thread of
 `question`, `answer` and `note` entries, defined in the task standard. An
-agent that needs a decision asks there and releases the task; you answer
-there; the next lap reads the answer. Nothing about an agent is visible except
-what it writes into tasks, so this is the whole channel.
+agent that needs a decision asks there and waits, polling `main` until an
+answer follows; you answer there; the agent reads the answer and carries on
+with the same lap. Nothing about an agent is visible except what it writes
+into tasks, so this is the whole channel — and the agent only sees `main`, so
+an answer counts once it is committed and pushed there.
 
 `tv` marks a task whose thread ends in an unanswered question with a yellow
 `?`, names who asked in the meta line, and counts them in the subtitle:
@@ -349,7 +351,9 @@ what it writes into tasks, so this is the whole channel.
 ```
 
 Answering from `tv` itself is task 007 in this repo's `tasks/`; until then,
-answer in your editor or in the control plane.
+answer in the control plane, which pushes the entry to `main` for you. An
+answer written in an editor reaches the agent only once you commit that one
+file and push it to `main` yourself.
 
 ## The control plane: `tv-web`
 
