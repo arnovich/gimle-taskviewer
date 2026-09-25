@@ -22,5 +22,9 @@ the same key.
 - The default kind is `answer` when the thread has an open question and
   `note` otherwise; an empty file aborts.
 - The list re-renders so the `?` disappears when the question is answered.
-- Unlike the control plane this writes to the working tree only — committing
-  stays with the owner, as it does for `next:`.
+- Like the control plane, the entry is committed and pushed to origin's
+  default branch on its own: that one task file only, from a throwaway
+  detached worktree of `origin/main` (the checkout may be dirty or on another
+  branch), retried from the fresh tip when the push is rejected. An agent
+  waiting in `grind` polls `main` for the answer, so an entry that stays in
+  the working tree reaches nobody. `next:` keeps its own commit rules.
