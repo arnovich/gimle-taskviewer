@@ -28,6 +28,7 @@ from textual.containers import VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Label, ListItem, ListView, Markdown
 
+from .conversation import KINDS, ConversationError, new_entry
 from .discovery import STATES, Task, count_states, load_tasks
 from .git_info import (
     GitInfo,
@@ -48,6 +49,7 @@ from .pull_requests import (
 )
 from .queue_ops import QueueError, clear_next, enqueue, promote
 from .remote import UpdateResult, cancel_all, fast_forward, fetch
+from .reply import PushResult, owner_handle, push_entry, refresh_checkout
 from .state_ops import StateChangeError, set_state
 from .workspace import Project, ProjectGroup, group_projects
 
@@ -216,6 +218,7 @@ class TaskViewerApp(App):
         Binding("f", "fetch", "Fetch", show=True),
         Binding("M", "merge_pr", "Merge PR", show=True),
         Binding("m", "comment_pr", "Comment", show=True),
+        Binding("a", "reply_task", "Reply", show=True),
         Binding("w", "open_pr", "Open in browser", show=True),
         Binding("u", "update", "Update", show=True),
         Binding("c", "work_on_task", "Work (Claude)", show=True),
@@ -268,6 +271,8 @@ class TaskViewerApp(App):
         self._pulls: dict[Path, PullRequest] = {}
         self._pr_errors: set[Path] = set()
         self._merging = False
+        self._replying = False
+        self._owner = owner_handle(os.environ.get("TV_OWNER", ""))
 
     @classmethod
     def single(
@@ -506,9 +511,13 @@ class TaskViewerApp(App):
             "Everything from the marker down is ignored. An empty message aborts.\n"
             "-->\n"
         )
+        return self._compose_text(template, "tv-comment-")
+
+    def _compose_text(self, template: str, prefix: str) -> tuple[str, Path] | None:
+        """Suspend the TUI, let $EDITOR fill ``template``, return the text and its file."""
         editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
         handle = tempfile.NamedTemporaryFile(
-            "w", suffix=".md", prefix="tv-comment-", delete=False, encoding="utf-8"
+            "w", suffix=".md", prefix=prefix, delete=False, encoding="utf-8"
         )
         with handle:
             handle.write(template)
@@ -532,6 +541,65 @@ class TaskViewerApp(App):
             path.unlink(missing_ok=True)
             return None
         return body, path
+
+    def action_reply_task(self) -> None:
+        """Answer the task's thread in $EDITOR; the entry is pushed to main."""
+        task = self._current_task()
+        if task is None or self._tasks_dir is None or self._replying:
+            return
+        number = task.number
+        if number is None:
+            self.notify(f"{task.task_id} has no task number to reply on", severity="error", timeout=6)
+            return
+        default = "answer" if task.open_question else "note"
+        try:
+            draft = self._compose_text(
+                _reply_template(task, default, self._owner), f"tv-reply-{number}-"
+            )
+        except Exception as error:  # noqa: BLE001 - never take the TUI down
+            self.notify(f"could not open an editor: {error}", severity="error", timeout=8)
+            return
+        kind, text = _split_kind(draft[0], default) if draft else (default, "")
+        if draft is None or not text:
+            if draft:
+                draft[1].unlink(missing_ok=True)
+            self.notify(
+                "nothing written — if your $EDITOR detaches (code, subl), "
+                "give it a blocking form such as `code --wait`",
+                timeout=8,
+            )
+            return
+        draft_path = draft[1]
+        try:
+            entry = new_entry(kind, self._owner, text)
+        except ConversationError as error:
+            self.notify(f"{error} — draft kept at {draft_path}", severity="error", timeout=10)
+            return
+        self._replying = True
+        self.notify(f"{number}: pushing {kind} to main…", timeout=3)
+        self._run_reply(self._tasks_dir.parent, task, number, entry, draft_path)
+
+    @work(thread=True, group="reply", exclusive=True, exit_on_error=False)
+    def _run_reply(self, root: Path, task: Task, number: str, entry, draft_path: Path) -> None:
+        result = push_entry(root, number, entry)
+        note = ""
+        if result.ok:
+            draft_path.unlink(missing_ok=True)
+            note = refresh_checkout(root, result.branch)
+        else:
+            # Never destroy what the user wrote; tell them where it is.
+            result = PushResult(False, f"{result.message} — draft kept at {draft_path}")
+        self.call_from_thread(self._on_reply_done, task, result, note)
+
+    def _on_reply_done(self, task: Task, result: PushResult, note: str) -> None:
+        self._replying = False
+        message = f"{task.number or task.task_id}: {result.message}" + (f" ({note})" if note else "")
+        self.notify(
+            message, severity="information" if result.ok else "warning", timeout=10
+        )
+        if self.is_running:
+            self._refresh_tasks(keep_selection=True)
+            self._load_git_info()
 
     def _current_path(self) -> Path | None:
         row = self._current_row()
@@ -1184,6 +1252,32 @@ def _remote_markers(info: GitInfo) -> list[str]:
     if info.unpulled and info.tracks_own_branch:
         markers.append(f"[bold cyan]↓{info.unpulled}[/]")
     return markers
+
+
+def _reply_template(task: Task, default: str, owner: str) -> str:
+    """The editor buffer for a reply: the kind on the first line, then the text."""
+    asked = task.open_question
+    context = ""
+    if asked is not None:
+        preview = " ".join(asked.text.split())[:240]
+        context = f"{asked.author} asked: {preview}\n"
+    return (
+        f"{default}\n\n\n{_COMMENT_FENCE}\n"
+        f"Reply on {task.number or task.task_id}: {task.title}\n"
+        f"{context}"
+        f"First line is the kind ({' | '.join(KINDS)}); the text follows.\n"
+        f"It is committed and pushed to main as {owner}; nothing is written to this checkout.\n"
+        "Everything from the marker down is ignored. An empty message aborts.\n"
+        "-->\n"
+    )
+
+
+def _split_kind(body: str, default: str) -> tuple[str, str]:
+    """``(kind, text)`` from an editor buffer; the first line is the kind if it names one."""
+    lines = body.strip().splitlines()
+    if lines and lines[0].strip().lower() in KINDS:
+        return lines[0].strip().lower(), "\n".join(lines[1:]).strip()
+    return default, body.strip()
 
 
 def _run_editor(editor: str, path: Path) -> subprocess.CompletedProcess | None:
