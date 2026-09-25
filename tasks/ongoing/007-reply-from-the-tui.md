@@ -1,6 +1,9 @@
 ---
 title: Reply to a task's conversation from tv
-state: open
+state: ongoing
+claimed_by: claude/6e99c99d-242f-4123-8681-978dfc1a3b08
+claimed_at: 2026-09-25T07:48:16Z
+branch: task/007_reply_from_the_tui
 priority: medium
 labels: [tui, enhancement]
 ---
