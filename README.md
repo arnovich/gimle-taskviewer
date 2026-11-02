@@ -1,5 +1,10 @@
 # tv — task viewer
 
+> **Retired on 2026-11-01.** This repository is archived and no longer
+> maintained. Its successor is Taskvalet, which manages the same task files
+> through a server, board and `valet` CLI. The open tasks under `tasks/open`
+> were left as they were when the repository was archived.
+
 A terminal UI for browsing a project's markdown task files.
 
 ## How it fits together
